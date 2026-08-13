@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -33,6 +33,31 @@ RETURN_PERIOD_LABELS = {
 }
 
 
+def calculate_operating_rate(
+    management_fee: float | None, custody_fee: float | None
+) -> float | None:
+    if management_fee is None or custody_fee is None:
+        return None
+    return management_fee + custody_fee
+
+
+def calculate_estimated_deviation(
+    close_price: float | None,
+    close_date: date | None,
+    nav: float | None,
+    nav_date: date | None,
+) -> float | None:
+    if (
+        close_price is None
+        or nav in (None, 0)
+        or close_date is None
+        or nav_date is None
+        or close_date != nav_date
+    ):
+        return None
+    return round((close_price / nav - 1) * 100, 4)
+
+
 class FundRepository(ABC):
     @abstractmethod
     def list_indices(self) -> list[IndexSummary]: ...
@@ -45,6 +70,9 @@ class FundRepository(ABC):
 
     @abstractmethod
     def get_fund(self, code: str) -> FundComparisonRow | None: ...
+
+    @abstractmethod
+    def get_funds(self, codes: list[str]) -> list[FundComparisonRow]: ...
 
     @abstractmethod
     def get_nav(self, code: str) -> list[NavPoint]: ...
@@ -74,6 +102,10 @@ class SampleFundRepository(FundRepository):
 
     def get_fund(self, code: str) -> FundComparisonRow | None:
         return next((item for item in self._funds if item.code == code), None)
+
+    def get_funds(self, codes: list[str]) -> list[FundComparisonRow]:
+        funds_by_code = {fund.code: fund for fund in self._funds}
+        return [funds_by_code[code] for code in codes if code in funds_by_code]
 
     def get_nav(self, code: str) -> list[NavPoint]:
         fund = self.get_fund(code)
@@ -180,23 +212,31 @@ class PostgresFundRepository(FundRepository):
             ]
 
     def get_fund(self, code: str) -> FundComparisonRow | None:
+        funds = self.get_funds([code])
+        return funds[0] if funds else None
+
+    def get_funds(self, codes: list[str]) -> list[FundComparisonRow]:
+        if not codes:
+            return []
         with self._session_factory() as session:
-            row = session.execute(
+            rows = session.execute(
                 self._fund_statement().where(
-                    or_(FundShareClass.code == code, FundListing.ticker == code)
+                    or_(FundShareClass.code.in_(codes), FundListing.ticker.in_(codes))
                 )
-            ).mappings().first()
-            if row is None:
-                return None
-            row_dict = dict(row)
+            ).mappings().all()
+            row_dicts = [dict(row) for row in rows]
             fees_by_share, metrics_by_share = self._load_fund_details(
-                session, [row_dict["share_id"]]
+                session, [row["share_id"] for row in row_dicts]
             )
-            return self._fund_row(
-                row_dict,
-                fees_by_share.get(row_dict["share_id"], {}),
-                metrics_by_share.get(row_dict["share_id"], {}),
-            )
+            funds_by_code = {
+                row["ticker"] or row["code"]: self._fund_row(
+                    row,
+                    fees_by_share.get(row["share_id"], {}),
+                    metrics_by_share.get(row["share_id"], {}),
+                )
+                for row in row_dicts
+            }
+            return [funds_by_code[code] for code in codes if code in funds_by_code]
 
     def get_nav(self, code: str) -> list[NavPoint]:
         with self._session_factory() as session:
@@ -381,14 +421,15 @@ class PostgresFundRepository(FundRepository):
         management = fees.get("management")
         custody = fees.get("custody")
         sales_service = fees.get("sales_service")
-        known_operating_fees = [fee for fee in (management, custody, sales_service) if fee is not None]
-        expense_rate = sum(known_operating_fees) if management is not None and custody is not None else None
+        expense_rate = calculate_operating_rate(management, custody)
         nav = float(row["nav"]) if row["nav"] is not None else None
         close = float(row["close_price"]) if row["close_price"] is not None else None
-        estimated_deviation = (
-            round((close / nav - 1) * 100, 4) if close is not None and nav not in (None, 0) else None
+        estimated_deviation = calculate_estimated_deviation(
+            close,
+            row["close_date"],
+            nav,
+            row["nav_date"],
         )
-        source_time = row["source_time"] or datetime.now(UTC)
 
         returns = [
             MetricValue(
@@ -440,7 +481,7 @@ class PostgresFundRepository(FundRepository):
             data_status=self._status(row["share_quality"]),
             source_name=row["source_name"],
             source_url=row["source_url"],
-            source_time=source_time,
+            source_time=row["source_time"],
         )
 
     @staticmethod

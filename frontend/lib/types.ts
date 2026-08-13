@@ -62,3 +62,10 @@ export interface FundListResponse {
   generatedAt: string;
   dataMode: string;
 }
+
+export interface ComparisonResponse {
+  items: FundComparisonRow[];
+  generatedAt: string;
+  warnings: string[];
+  metadata: Record<string, unknown>;
+}

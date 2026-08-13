@@ -84,19 +84,28 @@ def list_index_funds(
 @app.get(f"{settings.api_prefix}/comparisons", response_model=ComparisonResponse)
 def compare_funds(
     repository: RepositoryDep,
-    fund_codes: Annotated[list[str], Query(alias="fundCodes")],
+    fund_codes: Annotated[
+        list[str], Query(alias="fundCodes", min_length=2, max_length=4)
+    ],
 ) -> ComparisonResponse:
-    items = [fund for code in fund_codes if (fund := repository.get_fund(code)) is not None]
+    unique_codes = list(dict.fromkeys(fund_codes))
+    if len(unique_codes) < 2:
+        raise HTTPException(status_code=422, detail="At least two distinct fund codes are required")
+
+    items = repository.get_funds(unique_codes)
     if not items:
         raise HTTPException(status_code=404, detail="No matching funds")
 
-    missing = sorted(set(fund_codes) - {item.code for item in items})
+    missing = sorted(set(unique_codes) - {item.code for item in items})
     index_ids = {item.index_id for item in items}
+    exact_benchmarks = {item.exact_benchmark for item in items}
     warnings: list[str] = []
     if missing:
         warnings.append(f"未找到基金代码：{', '.join(missing)}")
     if len(index_ids) > 1:
         warnings.append("所选基金不属于同一指数，不建议直接比较跟踪表现。")
+    elif len(exact_benchmarks) > 1:
+        warnings.append("所选基金的精确跟踪基准不同，请结合各基金合同口径比较。")
 
     return ComparisonResponse(
         items=items,

@@ -126,7 +126,7 @@ FUND_ROWS = [
         "close_date": "2026-08-12",
         "nav": 1.9941,
         "nav_date": "2026-08-11",
-        "estimated_deviation": 1.85,
+        "estimated_deviation": None,
         "scale_billion_cny": 16.31,
         "scale_date": "2026-06-30",
         "returns": [metric("1月", 2.11, "2026-07-13"), metric("3月", 6.48, "2026-05-12"), metric("年初至今", 13.02, "2025-12-31"), metric("1年", 24.77, "2025-08-12")],
@@ -176,7 +176,7 @@ FUND_ROWS = [
         "management_fee": 0.60,
         "custody_fee": 0.20,
         "sales_service_fee": 0.35,
-        "expense_rate": 1.15,
+        "expense_rate": 0.80,
         "nav": 4.5327,
         "nav_date": "2026-08-11",
         "scale_billion_cny": 5.64,
@@ -206,7 +206,7 @@ FUND_ROWS = [
         "close_date": "2026-08-12",
         "nav": 1.6382,
         "nav_date": "2026-08-11",
-        "estimated_deviation": 1.58,
+        "estimated_deviation": None,
         "scale_billion_cny": 18.49,
         "scale_date": "2026-06-30",
         "returns": [metric("1月", 3.24, "2026-07-13"), metric("3月", 8.81, "2026-05-12"), metric("年初至今", 16.30, "2025-12-31"), metric("1年", 30.51, "2025-08-12")],
@@ -215,4 +215,3 @@ FUND_ROWS = [
         "source_url": "https://www.szse.cn/www/market/product/list/etfList/",
     },
 ]
-

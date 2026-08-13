@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { getFunds, getIndices } from "@/lib/api";
+import { getComparison, getFunds, getIndices } from "@/lib/api";
 import type { FundComparisonRow, IndexSummary, TradingVenue } from "@/lib/types";
 import { CloseIcon, InfoIcon, MarkIcon, RefreshIcon, SearchIcon } from "./icons";
+import { ComparisonView } from "./comparison-view";
 import { FundCards, FundTable } from "./fund-table";
 
 type VenueFilter = "全部" | TradingVenue;
@@ -37,7 +38,13 @@ export function ComparisonDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [comparisonOpen, setComparisonOpen] = useState(false);
+  const [comparisonFunds, setComparisonFunds] = useState<FundComparisonRow[]>([]);
+  const [comparisonWarnings, setComparisonWarnings] = useState<string[]>([]);
+  const [comparisonLoading, setComparisonLoading] = useState(false);
+  const [comparisonError, setComparisonError] = useState<string | null>(null);
   const fundCache = useRef(new Map<string, CachedFunds>());
+  const comparisonController = useRef<AbortController | null>(null);
 
   const loadIndices = useCallback(async (signal?: AbortSignal) => {
     const items = await getIndices(signal);
@@ -97,6 +104,8 @@ export function ComparisonDashboard() {
     return () => controller.abort();
   }, [loadFunds]);
 
+  useEffect(() => () => comparisonController.current?.abort(), []);
+
   const currentIndex = indices.find((item) => item.id === activeIndex);
   const visibleFunds = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -148,6 +157,32 @@ export function ComparisonDashboard() {
     } catch {
       setError("刷新失败，请检查后端服务。");
     }
+  }
+
+  async function startComparison() {
+    if (selected.length < 2) return;
+    comparisonController.current?.abort();
+    const controller = new AbortController();
+    comparisonController.current = controller;
+    setComparisonOpen(true);
+    setComparisonLoading(true);
+    setComparisonError(null);
+    try {
+      const response = await getComparison(selected, controller.signal);
+      setComparisonFunds(response.items);
+      setComparisonWarnings(response.warnings);
+    } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === "AbortError") return;
+      setComparisonError("暂时无法获取比较结果，请检查后端服务后重试。");
+    } finally {
+      if (!controller.signal.aborted) setComparisonLoading(false);
+    }
+  }
+
+  function closeComparison() {
+    comparisonController.current?.abort();
+    comparisonController.current = null;
+    setComparisonOpen(false);
   }
 
   return (
@@ -260,7 +295,7 @@ export function ComparisonDashboard() {
           )}
 
           <p className="table-footnote">
-            估算偏离采用“收盘价 ÷ 最新可用净值 − 1”，QDII 净值日期可能滞后。
+            仅当收盘价和净值日期一致时，展示“收盘价 ÷ 单位净值 − 1”的同日估算偏离。
           </p>
         </section>
       </main>
@@ -278,11 +313,22 @@ export function ComparisonDashboard() {
           </div>
           <div className="selection-actions">
             <button className="ghost-button" type="button" onClick={() => setSelected([])}>清空</button>
-            <button className="primary-button" type="button" disabled={selected.length < 2}>
+            <button className="primary-button" type="button" disabled={selected.length < 2} onClick={startComparison}>
               {selected.length < 2 ? "再选一个开始比较" : `比较 ${selected.length} 个份额`}
             </button>
           </div>
         </aside>
+      )}
+
+      {comparisonOpen && (
+        <ComparisonView
+          funds={comparisonFunds}
+          warnings={comparisonWarnings}
+          loading={comparisonLoading}
+          error={comparisonError}
+          onClose={closeComparison}
+          onRetry={startComparison}
+        />
       )}
     </div>
   );

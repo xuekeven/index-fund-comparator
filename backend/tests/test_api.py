@@ -58,7 +58,47 @@ def test_compare_returns_warning_for_cross_index_selection() -> None:
         params=[("fundCodes", "510500"), ("fundCodes", "006075")],
     )
     assert response.status_code == 200
-    assert len(response.json()["warnings"]) == 1
+    assert response.json()["warnings"] == [
+        "所选基金不属于同一指数，不建议直接比较跟踪表现。"
+    ]
+
+
+def test_compare_warns_for_different_exact_benchmarks() -> None:
+    response = client.get(
+        "/api/v1/comparisons",
+        params=[("fundCodes", "513500"), ("fundCodes", "050025")],
+    )
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        "所选基金的精确跟踪基准不同，请结合各基金合同口径比较。"
+    ]
+
+
+def test_compare_requires_between_two_and_four_funds() -> None:
+    too_few = client.get("/api/v1/comparisons", params={"fundCodes": "510500"})
+    too_many = client.get(
+        "/api/v1/comparisons",
+        params=[("fundCodes", code) for code in ("1", "2", "3", "4", "5")],
+    )
+    assert too_few.status_code == 422
+    assert too_many.status_code == 422
+
+
+def test_compare_requires_distinct_fund_codes() -> None:
+    response = client.get(
+        "/api/v1/comparisons",
+        params=[("fundCodes", "510500"), ("fundCodes", "510500")],
+    )
+    assert response.status_code == 422
+
+
+def test_sample_operating_rate_and_deviation_follow_display_contract() -> None:
+    response = client.get("/api/v1/indices/sp-500/funds")
+    assert response.status_code == 200
+    funds = {item["code"]: item for item in response.json()["items"]}
+    assert funds["006075"]["expenseRate"] == 0.8
+    assert funds["006075"]["salesServiceFee"] == 0.35
+    assert funds["513500"]["estimatedDeviation"] is None
 
 
 def test_unknown_index_is_404() -> None:
