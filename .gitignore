@@ -1,0 +1,24 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+frontend/*.tsbuildinfo
+frontend/.env.local
+frontend/.env.production
+frontend/.playwright-cli/
+frontend/output/
+
+# Backend
+backend/.venv/
+backend/.env
+backend/*.egg-info/
+backend/**/__pycache__/
+backend/.pytest_cache/
+
+# Process manager
+*.log
+*.pid
+
+# Editors and operating systems
+.DS_Store
+*.swp
