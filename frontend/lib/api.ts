@@ -6,7 +6,7 @@ import type {
 } from "./types";
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:7006/api/v1";
+  import.meta.env.VITE_API_BASE_URL ?? "/indexfund/api/v1";
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {

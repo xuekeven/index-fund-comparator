@@ -59,6 +59,7 @@ export interface FundListResponse {
   index: IndexSummary;
   items: FundComparisonRow[];
   total: number;
+  lastSyncedAt: string | null;
   generatedAt: string;
   dataMode: string;
 }

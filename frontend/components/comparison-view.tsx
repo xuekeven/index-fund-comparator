@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
 
+import { getFundDetailUrl } from "@/lib/fund-links";
 import type { FundComparisonRow } from "@/lib/types";
 import { CloseIcon, ExternalIcon, InfoIcon } from "./icons";
 
@@ -28,17 +29,6 @@ function formatDate(value: string | null) {
 
 function getReturn(fund: FundComparisonRow, period: string) {
   return fund.returns.find((item) => item.period === period)?.value ?? null;
-}
-
-function getFundDetailUrl(fund: FundComparisonRow) {
-  if (fund.exchange === "上交所") {
-    return `https://etf.sse.com.cn/fundlist/funddetail/index.shtml?code=${encodeURIComponent(fund.code)}`;
-  }
-  if (fund.exchange === "深交所") {
-    const params = new URLSearchParams({ stock: fund.code, name: fund.displayName });
-    return `https://www.szse.cn/disclosure/fund/etf/index.html?${params.toString()}`;
-  }
-  return fund.sourceUrl;
 }
 
 function Value({ children, muted = false }: { children: ReactNode; muted?: boolean }) {

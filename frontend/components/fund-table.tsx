@@ -1,10 +1,19 @@
+import { getFundDetailUrl } from "@/lib/fund-links";
 import type { FundComparisonRow } from "@/lib/types";
-import { ExternalIcon } from "./icons";
 
 interface FundListProps {
   funds: FundComparisonRow[];
   selected: string[];
   onToggle: (code: string) => void;
+}
+
+export type FundSortKey = "code" | "expenseRate" | "scale";
+export type SortDirection = "asc" | "desc";
+
+interface FundTableProps extends FundListProps {
+  sortKey: FundSortKey | null;
+  sortDirection: SortDirection;
+  onSort: (key: FundSortKey) => void;
 }
 
 function formatPercent(value: number | null, digits = 2) {
@@ -29,17 +38,6 @@ function dateLabel(value: string | null) {
   return value.slice(5).replace("-", "/");
 }
 
-function getFundDetailUrl(fund: FundComparisonRow) {
-  if (fund.exchange === "上交所") {
-    return `https://etf.sse.com.cn/fundlist/funddetail/index.shtml?code=${encodeURIComponent(fund.code)}`;
-  }
-  if (fund.exchange === "深交所") {
-    const params = new URLSearchParams({ stock: fund.code, name: fund.displayName });
-    return `https://www.szse.cn/disclosure/fund/etf/index.html?${params.toString()}`;
-  }
-  return fund.sourceUrl;
-}
-
 function ReturnValue({ value }: { value: number | null }) {
   return <span className={value === null ? "muted" : value >= 0 ? "positive" : "negative"}>{formatPercent(value)}</span>;
 }
@@ -53,23 +51,68 @@ function SelectBox({ checked, disabled, onChange, label }: { checked: boolean; d
   );
 }
 
-export function FundTable({ funds, selected, onToggle }: FundListProps) {
+function SortableHeader({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  onSort,
+}: {
+  label: string;
+  sortKey: FundSortKey;
+  activeKey: FundSortKey | null;
+  direction: SortDirection;
+  onSort: (key: FundSortKey) => void;
+}) {
+  const active = activeKey === sortKey;
+  const nextDirection = active && direction === "asc" ? "倒序" : "正序";
+
+  return (
+    <button
+      className="sortable-header"
+      type="button"
+      onClick={() => onSort(sortKey)}
+      aria-label={`${label}按${nextDirection}排列`}
+    >
+      <span>{label}</span>
+      <span className={`sort-arrows ${active ? direction : ""}`} aria-hidden="true">
+        <i className="sort-up" />
+        <i className="sort-down" />
+      </span>
+    </button>
+  );
+}
+
+export function FundTable({
+  funds,
+  selected,
+  onToggle,
+  sortKey,
+  sortDirection,
+  onSort,
+}: FundTableProps) {
   return (
     <div className="table-wrap">
       <table className="fund-table">
         <thead>
           <tr>
             <th className="select-column"><span className="sr-only">选择</span></th>
-            <th className="code-column">基金代码</th>
-            <th>基金份额</th>
+            <th className="code-column" aria-sort={sortKey === "code" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="基金代码" sortKey="code" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+            </th>
+            <th className="fund-column">基金份额</th>
             <th>交易与净值</th>
-            <th>运作费率</th>
+            <th className="fee-column" aria-sort={sortKey === "expenseRate" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="运作费率" sortKey="expenseRate" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+            </th>
             <th>近1月</th>
             <th>今年以来</th>
             <th>近1年</th>
             <th>跟踪误差<br /><small>近1年</small></th>
-            <th>基金规模<br /><small>亿元</small></th>
-            <th><span className="sr-only">基金详情</span></th>
+            <th aria-sort={sortKey === "scale" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="基金规模" sortKey="scale" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+              <br /><small>亿元</small>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -81,23 +124,49 @@ export function FundTable({ funds, selected, onToggle }: FundListProps) {
                 <td className="select-column">
                   <SelectBox checked={isSelected} disabled={!isSelected && selected.length >= 4} onChange={() => onToggle(fund.code)} label={`选择${fund.displayName}`} />
                 </td>
-                <td className="code-column"><span>{fund.code}</span></td>
+                <td className="code-column">
+                  {detailUrl ? (
+                    <a
+                      className="fund-code-link"
+                      href={detailUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`查看${fund.displayName}官方详情`}
+                    >
+                      {fund.code}
+                    </a>
+                  ) : <span>{fund.code}</span>}
+                </td>
                 <td className="fund-cell">
                   <div className="fund-name-row">
                     <strong>{fund.displayName}</strong>
-                    {fund.shareClass && <span className="share-badge">{fund.shareClass}</span>}
                   </div>
                   <span className="fund-company">{fund.fundCompany}</span>
                   <div className="tags"><span>{fund.productStructure}</span>{fund.investmentScope.map((item) => <span key={item}>{item}</span>)}{fund.exchange && <span>{fund.exchange}</span>}</div>
                 </td>
                 <td className="price-cell">
-                  {fund.closePrice !== null && <div><span>收盘</span><strong>{formatNumber(fund.closePrice, 3)}</strong><small>{dateLabel(fund.closeDate)}</small></div>}
-                  <div><span>净值</span><strong>{formatNumber(fund.nav)}</strong><small>{dateLabel(fund.navDate)}</small></div>
+                  {fund.closePrice !== null && (
+                    <div>
+                      <span>收盘</span>
+                      <div className="price-value">
+                        <strong>{formatNumber(fund.closePrice, 3)}</strong>
+                        <small title="该收盘价对应的交易日期">交易日 {dateLabel(fund.closeDate)}</small>
+                      </div>
+                    </div>
+                  )}
+                  <div>
+                    <span>净值</span>
+                    <div className="price-value">
+                      <strong>{formatNumber(fund.nav)}</strong>
+                      <small title="该单位净值对应的净值日期">净值日 {dateLabel(fund.navDate)}</small>
+                    </div>
+                  </div>
                   {fund.estimatedDeviation !== null && <em className={fund.estimatedDeviation >= 0 ? "warn" : "negative"}>估算偏离 {formatPercent(fund.estimatedDeviation)}</em>}
                 </td>
                 <td className="fee-cell">
                   <strong>{fund.expenseRate === null ? "—" : `${fund.expenseRate.toFixed(2)}%`}</strong>
-                  <small>管理 {formatFee(fund.managementFee)} · 托管 {formatFee(fund.custodyFee)}</small>
+                  <small>管理 {formatFee(fund.managementFee)}</small>
+                  <small>托管 {formatFee(fund.custodyFee)}</small>
                   {fund.salesServiceFee !== null && <small>销售服务 {formatFee(fund.salesServiceFee)}</small>}
                 </td>
                 <td><ReturnValue value={getReturn(fund, "1月")} /></td>
@@ -105,9 +174,6 @@ export function FundTable({ funds, selected, onToggle }: FundListProps) {
                 <td><ReturnValue value={getReturn(fund, "1年")} /></td>
                 <td>{fund.trackingError1y === null ? <span className="pending-value">待核验</span> : <span>{fund.trackingError1y.toFixed(2)}%</span>}</td>
                 <td className="scale-cell"><strong>{fund.scaleBillionCny?.toFixed(2) ?? "—"}</strong><small>{dateLabel(fund.scaleDate)}</small></td>
-                <td>
-                  {detailUrl && <a className="source-link" href={detailUrl} target="_blank" rel="noreferrer" title={`查看${fund.displayName}官方详情`} aria-label={`查看${fund.displayName}官方详情`}><ExternalIcon /></a>}
-                </td>
               </tr>
             );
           })}
@@ -127,8 +193,23 @@ export function FundCards({ funds, selected, onToggle }: FundListProps) {
           <article className={`fund-card ${isSelected ? "selected" : ""}`} key={fund.id}>
             <div className="card-head">
               <SelectBox checked={isSelected} disabled={!isSelected && selected.length >= 4} onChange={() => onToggle(fund.code)} label={`选择${fund.displayName}`} />
-              <div><strong>{fund.displayName}</strong><span>{fund.code} · {fund.fundCompany}</span></div>
-              {detailUrl && <a className="source-link" href={detailUrl} target="_blank" rel="noreferrer" aria-label={`查看${fund.displayName}官方详情`}><ExternalIcon /></a>}
+              <div>
+                <strong>{fund.displayName}</strong>
+                <span>
+                  {detailUrl ? (
+                    <a
+                      className="fund-code-link"
+                      href={detailUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`查看${fund.displayName}官方详情`}
+                    >
+                      {fund.code}
+                    </a>
+                  ) : fund.code}
+                  {" · "}{fund.fundCompany}
+                </span>
+              </div>
             </div>
             <div className="tags"><span>{fund.productStructure}</span>{fund.investmentScope.map((item) => <span key={item}>{item}</span>)}{fund.exchange && <span>{fund.exchange}</span>}</div>
             <div className="card-primary">

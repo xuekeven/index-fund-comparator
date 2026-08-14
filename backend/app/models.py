@@ -103,6 +103,7 @@ class FundListResponse(ApiModel):
     index: IndexSummary
     items: list[FundComparisonRow]
     total: int
+    last_synced_at: datetime | None = None
     generated_at: datetime
     data_mode: str
 

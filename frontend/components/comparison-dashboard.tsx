@@ -6,19 +6,26 @@ import { getComparison, getFunds, getIndices } from "@/lib/api";
 import type { FundComparisonRow, IndexSummary, TradingVenue } from "@/lib/types";
 import { CloseIcon, InfoIcon, MarkIcon, RefreshIcon, SearchIcon } from "./icons";
 import { ComparisonView } from "./comparison-view";
-import { FundCards, FundTable } from "./fund-table";
+import {
+  FundCards,
+  FundTable,
+  type FundSortKey,
+  type SortDirection,
+} from "./fund-table";
 
 type VenueFilter = "全部" | TradingVenue;
+type ExchangeFilter = "全部" | "深交所" | "上交所";
 
 const VENUES: VenueFilter[] = ["全部", "场内", "场外"];
+const EXCHANGES: Exclude<ExchangeFilter, "全部">[] = ["深交所", "上交所"];
 
 type CachedFunds = {
   items: FundComparisonRow[];
-  loadedAt: Date;
+  lastSyncedAt: Date | null;
 };
 
-function formatUpdateTime(value: Date | null) {
-  if (!value) return "尚未更新";
+function formatSyncTime(value: Date | null) {
+  if (!value) return "尚未同步";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
@@ -28,16 +35,97 @@ function formatUpdateTime(value: Date | null) {
   }).format(value);
 }
 
+function comparisonScopeText(index: IndexSummary) {
+  if (index.region === "中国内地") {
+    return `当前展示跟踪${index.shortName}的基金；价格、全收益等具体口径以基金合同为准。`;
+  }
+  return `当前展示跟踪${index.shortName}的基金；收益指数及人民币折算口径以基金合同为准。`;
+}
+
+interface MultiSelectFilterProps {
+  filterId: string;
+  label: string;
+  options: string[];
+  selected: string[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onToggle: (value: string) => void;
+  onClear: () => void;
+}
+
+function MultiSelectFilter({
+  filterId,
+  label,
+  options,
+  selected,
+  open,
+  onOpenChange,
+  onToggle,
+  onClear,
+}: MultiSelectFilterProps) {
+  const selectionLabel = selected.length === 0
+    ? "全部"
+    : selected.length === 1
+      ? selected[0]
+      : `已选 ${selected.length} 项`;
+
+  return (
+    <div className={`multi-filter ${open ? "open" : ""}`}>
+      <button
+        className="multi-filter-trigger"
+        type="button"
+        aria-expanded={open}
+        aria-controls={`${filterId}-menu`}
+        onClick={() => onOpenChange(!open)}
+      >
+        <span>{label}</span>
+        <strong>{selectionLabel}</strong>
+      </button>
+      {open && (
+        <div className="multi-filter-menu" id={`${filterId}-menu`}>
+          <button
+            type="button"
+            className={selected.length === 0 ? "active" : ""}
+            onClick={() => {
+              onClear();
+              onOpenChange(false);
+            }}
+          >
+            全部
+          </button>
+          {options.map((option) => (
+            <label key={option}>
+              <input
+                type="checkbox"
+                checked={selected.includes(option)}
+                onChange={() => onToggle(option)}
+              />
+              <span aria-hidden="true">{selected.includes(option) ? "✓" : ""}</span>
+              {option}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ComparisonDashboard() {
   const [indices, setIndices] = useState<IndexSummary[]>([]);
   const [activeIndex, setActiveIndex] = useState("csi-500");
   const [venue, setVenue] = useState<VenueFilter>("全部");
+  const [exchanges, setExchanges] = useState<string[]>([]);
+  const [shareClasses, setShareClasses] = useState<string[]>([]);
+  const [currencies, setCurrencies] = useState<string[]>([]);
+  const [openFilter, setOpenFilter] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<FundSortKey | null>(null);
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [funds, setFunds] = useState<FundComparisonRow[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [comparisonOpen, setComparisonOpen] = useState(false);
   const [comparisonFunds, setComparisonFunds] = useState<FundComparisonRow[]>([]);
   const [comparisonWarnings, setComparisonWarnings] = useState<string[]>([]);
@@ -60,7 +148,7 @@ export function ComparisonDashboard() {
     const cached = fundCache.current.get(activeIndex);
     if (cached && !force) {
       setFunds(cached.items);
-      setUpdatedAt(cached.loadedAt);
+      setLastSyncedAt(cached.lastSyncedAt);
       setError(null);
       setLoading(false);
       return;
@@ -69,10 +157,13 @@ export function ComparisonDashboard() {
     setError(null);
     try {
       const response = await getFunds(activeIndex, undefined, signal);
-      const loadedAt = new Date();
-      fundCache.current.set(activeIndex, { items: response.items, loadedAt });
+      const syncedAt = response.lastSyncedAt ? new Date(response.lastSyncedAt) : null;
+      fundCache.current.set(activeIndex, {
+        items: response.items,
+        lastSyncedAt: syncedAt,
+      });
       setFunds(response.items);
-      setUpdatedAt(loadedAt);
+      setLastSyncedAt(syncedAt);
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === "AbortError") return;
       setError("暂时无法连接数据服务，请稍后重试。");
@@ -106,17 +197,94 @@ export function ComparisonDashboard() {
 
   useEffect(() => () => comparisonController.current?.abort(), []);
 
+  useEffect(() => {
+    if (!openFilter) return;
+
+    function closeOnOutsideClick(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".multi-filter")) return;
+      setOpenFilter(null);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpenFilter(null);
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openFilter]);
+
   const currentIndex = indices.find((item) => item.id === activeIndex);
+  const shareClassOptions = useMemo(
+    () => Array.from(
+      new Set(funds.flatMap((fund) => fund.shareClass ? [fund.shareClass] : [])),
+    ).sort((left, right) => left.localeCompare(right, "zh-CN")),
+    [funds],
+  );
+  const currencyOptions = useMemo(
+    () => Array.from(new Set(funds.map((fund) => fund.currency)))
+      .sort((left, right) => left.localeCompare(right, "zh-CN")),
+    [funds],
+  );
   const visibleFunds = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return funds.filter((fund) => {
       if (venue !== "全部" && fund.tradingVenue !== venue) return false;
+      if (exchanges.length > 0 && (!fund.exchange || !exchanges.includes(fund.exchange))) {
+        return false;
+      }
+      if (
+        shareClasses.length > 0
+        && (!fund.shareClass || !shareClasses.includes(fund.shareClass))
+      ) {
+        return false;
+      }
+      if (currencies.length > 0 && !currencies.includes(fund.currency)) return false;
       if (!normalized) return true;
       return [fund.code, fund.displayName, fund.fundCompany].some((value) =>
         value.toLocaleLowerCase().includes(normalized),
       );
     });
-  }, [funds, query, venue]);
+  }, [currencies, exchanges, funds, query, shareClasses, venue]);
+
+  const sortedFunds = useMemo(() => {
+    if (!sortKey) return visibleFunds;
+
+    return visibleFunds
+      .map((fund, originalIndex) => ({ fund, originalIndex }))
+      .sort((leftItem, rightItem) => {
+        const { fund: left } = leftItem;
+        const { fund: right } = rightItem;
+
+        if (sortKey === "code") {
+          const comparison = left.code.localeCompare(right.code, "zh-CN", { numeric: true });
+          return comparison === 0
+            ? leftItem.originalIndex - rightItem.originalIndex
+            : sortDirection === "asc" ? comparison : -comparison;
+        }
+
+        const leftValue = sortKey === "expenseRate"
+          ? left.expenseRate
+          : left.scaleBillionCny;
+        const rightValue = sortKey === "expenseRate"
+          ? right.expenseRate
+          : right.scaleBillionCny;
+        if (leftValue === null && rightValue === null) {
+          return leftItem.originalIndex - rightItem.originalIndex;
+        }
+        if (leftValue === null) return 1;
+        if (rightValue === null) return -1;
+        if (leftValue === rightValue) {
+          return left.code.localeCompare(right.code, "zh-CN", { numeric: true });
+        }
+        return sortDirection === "asc" ? leftValue - rightValue : rightValue - leftValue;
+      })
+      .map(({ fund }) => fund);
+  }, [sortDirection, sortKey, visibleFunds]);
 
   const selectedFunds = useMemo(
     () => funds.filter((fund) => selected.includes(fund.code)),
@@ -129,16 +297,50 @@ export function ComparisonDashboard() {
     setLoading(!cached);
     if (cached) {
       setFunds(cached.items);
-      setUpdatedAt(cached.loadedAt);
+      setLastSyncedAt(cached.lastSyncedAt);
     }
     setActiveIndex(indexId);
     setVenue("全部");
+    setExchanges([]);
+    setShareClasses([]);
+    setCurrencies([]);
+    setOpenFilter(null);
     setSelected([]);
     setQuery("");
   }
 
   function changeVenue(nextVenue: VenueFilter) {
     setVenue(nextVenue);
+    setOpenFilter(null);
+    if (nextVenue !== "场内") setExchanges([]);
+    if (nextVenue !== "场外") {
+      setShareClasses([]);
+      setCurrencies([]);
+    }
+  }
+
+  function sortFunds(key: FundSortKey) {
+    if (sortKey === key) {
+      setSortDirection((current) => current === "asc" ? "desc" : "asc");
+      return;
+    }
+    setSortKey(key);
+    setSortDirection("asc");
+  }
+
+  function toggleValue(
+    value: string,
+    setter: React.Dispatch<React.SetStateAction<string[]>>,
+  ) {
+    setter((current) => (
+      current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value]
+    ));
+  }
+
+  function toggleExchange(value: string) {
+    toggleValue(value, setExchanges);
   }
 
   function toggleFund(code: string) {
@@ -209,10 +411,6 @@ export function ComparisonDashboard() {
               <span className="section-kicker">选择基准</span>
               <h2 id="workspace-title">比较同类基金</h2>
             </div>
-            <div className="updated-at">
-              <span className="status-dot" />
-              更新时间 {formatUpdateTime(updatedAt)}
-            </div>
           </div>
 
           <div className="index-tabs" role="tablist" aria-label="指数">
@@ -235,25 +433,63 @@ export function ComparisonDashboard() {
             <div className="benchmark-note">
               <InfoIcon />
               <div>
-                <strong>当前比较口径</strong>
-                <span>{currentIndex.exactBenchmark}</span>
+                <strong>比较范围</strong>
+                <span>{comparisonScopeText(currentIndex)}</span>
               </div>
               {currentIndex.id !== "csi-500" && <b>精确基准待授权核验</b>}
             </div>
           )}
 
           <div className="toolbar">
-            <div className="segment" aria-label="交易方式筛选">
-              {VENUES.map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  className={venue === item ? "active" : ""}
-                  onClick={() => changeVenue(item)}
-                >
-                  {item}
-                </button>
-              ))}
+            <div className="toolbar-filters">
+              <div className="segment" aria-label="交易方式筛选">
+                {VENUES.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    className={venue === item ? "active" : ""}
+                    onClick={() => changeVenue(item)}
+                  >
+                    {item}
+                  </button>
+                ))}
+              </div>
+              {venue === "场内" && (
+                <MultiSelectFilter
+                  filterId="exchange-filter"
+                  label="交易所"
+                  options={EXCHANGES}
+                  selected={exchanges}
+                  open={openFilter === "exchange"}
+                  onOpenChange={(open) => setOpenFilter(open ? "exchange" : null)}
+                  onToggle={toggleExchange}
+                  onClear={() => setExchanges([])}
+                />
+              )}
+              {venue === "场外" && (
+                <>
+                  <MultiSelectFilter
+                    filterId="share-class-filter"
+                    label="份额类别"
+                    options={shareClassOptions}
+                    selected={shareClasses}
+                    open={openFilter === "share-class"}
+                    onOpenChange={(open) => setOpenFilter(open ? "share-class" : null)}
+                    onToggle={(value) => toggleValue(value, setShareClasses)}
+                    onClear={() => setShareClasses([])}
+                  />
+                  <MultiSelectFilter
+                    filterId="currency-filter"
+                    label="币种"
+                    options={currencyOptions}
+                    selected={currencies}
+                    open={openFilter === "currency"}
+                    onOpenChange={(open) => setOpenFilter(open ? "currency" : null)}
+                    onToggle={(value) => toggleValue(value, setCurrencies)}
+                    onClear={() => setCurrencies([])}
+                  />
+                </>
+              )}
             </div>
             <label className="search-box">
               <SearchIcon />
@@ -271,6 +507,18 @@ export function ComparisonDashboard() {
             </label>
           </div>
 
+          {!loading && !error && (
+            <div className="fund-result-summary" aria-live="polite">
+              <p className="fund-result-count">
+                共有 <strong>{visibleFunds.length}</strong> 条基金
+              </p>
+              <p className="fund-last-synced">
+                <span className="status-dot" />
+                最后同步 {formatSyncTime(lastSyncedAt)}
+              </p>
+            </div>
+          )}
+
           {error ? (
             <div className="state-panel error-state">
               <strong>数据服务未连接</strong>
@@ -280,7 +528,7 @@ export function ComparisonDashboard() {
           ) : loading ? (
             <div className="state-panel loading-state">
               <span className="spinner" />
-              <p>正在整理同类基金…</p>
+              <p>正在加载…</p>
             </div>
           ) : visibleFunds.length === 0 ? (
             <div className="state-panel">
@@ -289,8 +537,15 @@ export function ComparisonDashboard() {
             </div>
           ) : (
             <>
-              <FundTable funds={visibleFunds} selected={selected} onToggle={toggleFund} />
-              <FundCards funds={visibleFunds} selected={selected} onToggle={toggleFund} />
+              <FundTable
+                funds={sortedFunds}
+                selected={selected}
+                onToggle={toggleFund}
+                sortKey={sortKey}
+                sortDirection={sortDirection}
+                onSort={sortFunds}
+              />
+              <FundCards funds={sortedFunds} selected={selected} onToggle={toggleFund} />
             </>
           )}
 

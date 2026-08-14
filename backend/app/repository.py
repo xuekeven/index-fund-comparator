@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import Select, and_, case, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select, union_all
 from sqlalchemy.orm import Session, aliased
 
 from app.config import get_settings
@@ -66,6 +66,9 @@ class FundRepository(ABC):
     def get_index(self, index_id: str) -> IndexSummary | None: ...
 
     @abstractmethod
+    def get_last_synced_at(self, index_id: str) -> datetime | None: ...
+
+    @abstractmethod
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]: ...
 
     @abstractmethod
@@ -94,6 +97,9 @@ class SampleFundRepository(FundRepository):
 
     def get_index(self, index_id: str) -> IndexSummary | None:
         return next((item for item in self._indices if item.id == index_id), None)
+
+    def get_last_synced_at(self, index_id: str) -> datetime | None:
+        return None
 
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]:
         if index_id is None:
@@ -191,6 +197,57 @@ class PostgresFundRepository(FundRepository):
                 return None
             family, count = row
             return self._index_summary(family, count or 0)
+
+    def get_last_synced_at(self, index_id: str) -> datetime | None:
+        statements = (
+            select(FundProduct.collected_at.label("collected_at"))
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+            select(FundShareClass.collected_at.label("collected_at"))
+            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+            select(FundListing.collected_at.label("collected_at"))
+            .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
+            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+            select(NavDaily.collected_at.label("collected_at"))
+            .join(FundShareClass, NavDaily.fund_share_class_id == FundShareClass.id)
+            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+            select(MarketQuote.collected_at.label("collected_at"))
+            .join(FundListing, MarketQuote.fund_listing_id == FundListing.id)
+            .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
+            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+            select(FundScale.collected_at.label("collected_at"))
+            .outerjoin(FundShareClass, FundScale.fund_share_class_id == FundShareClass.id)
+            .join(
+                FundProduct,
+                or_(
+                    FundScale.fund_product_id == FundProduct.id,
+                    FundShareClass.fund_product_id == FundProduct.id,
+                ),
+            )
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+            select(FeeHistory.collected_at.label("collected_at"))
+            .join(FundShareClass, FeeHistory.fund_share_class_id == FundShareClass.id)
+            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+            select(CalculatedMetric.collected_at.label("collected_at"))
+            .join(FundShareClass, CalculatedMetric.fund_share_class_id == FundShareClass.id)
+            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id),
+        )
+        sync_times = union_all(*statements).subquery()
+        with self._session_factory() as session:
+            return session.scalar(select(func.max(sync_times.c.collected_at)))
 
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]:
         with self._session_factory() as session:
@@ -350,7 +407,7 @@ class PostgresFundRepository(FundRepository):
                 latest_scale.report_date.label("scale_date"),
                 source.source_name,
                 func.coalesce(
-                    FundShareClass.source_url, FundProduct.source_url, source.url
+                    FundProduct.source_url, FundShareClass.source_url, source.url
                 ).label("source_url"),
                 func.coalesce(
                     FundShareClass.source_time, FundProduct.source_time, source.published_at

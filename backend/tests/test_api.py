@@ -36,6 +36,30 @@ def test_api_documentation_is_disabled() -> None:
     assert client.get("/openapi.json").status_code == 404
 
 
+def test_frontend_rejects_path_traversal() -> None:
+    response = client.get("/%2E%2E/backend/app/main.py")
+    assert response.status_code in {200, 404, 503}
+    assert "from fastapi import" not in response.text
+
+
+def test_frontend_serves_spa_fallback() -> None:
+    response = client.get("/some/client/route")
+    assert response.status_code == 200
+    assert "<div id=\"root\"></div>" in response.text
+
+
+def test_frontend_serves_built_asset() -> None:
+    index = client.get("/")
+    asset_path = index.text.split('src="', 1)[1].split('"', 1)[0]
+    response = client.get(asset_path.removeprefix("/indexfund"))
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+
+
+def test_unknown_api_route_remains_404() -> None:
+    assert client.get("/api/v1/not-a-route").status_code == 404
+
+
 def test_indices_include_fund_counts() -> None:
     response = client.get("/api/v1/indices")
     assert response.status_code == 200
@@ -49,6 +73,7 @@ def test_filter_funds_by_venue() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 2
+    assert body["lastSyncedAt"] is None
     assert all(item["tradingVenue"] == "场外" for item in body["items"])
 
 

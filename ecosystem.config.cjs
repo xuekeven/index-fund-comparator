@@ -8,20 +8,12 @@ module.exports = {
       name: "index-fund-api",
       cwd: path.join(root, "backend"),
       script: ".venv/bin/uvicorn",
-      args: "app.main:app --host 0.0.0.0 --port 7006",
+      args: "app.main:app --host 127.0.0.1 --port 6006",
       interpreter: "none",
       autorestart: true,
       max_restarts: 10,
       restart_delay: 3000,
       time: true,
-    },
-  ],
-  static: [
-    {
-      name: "index-fund-web",
-      path: path.join(root, "frontend", "dist"),
-      port: 6006,
-      spa: true,
     },
   ],
 };

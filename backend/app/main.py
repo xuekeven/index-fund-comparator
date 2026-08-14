@@ -1,8 +1,10 @@
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from app.config import Settings, get_settings
 from app.models import (
@@ -33,11 +35,8 @@ app.add_middleware(
 )
 
 RepositoryDep = Annotated[FundRepository, Depends(get_repository)]
-
-
-@app.get("/", include_in_schema=False)
-def root() -> dict[str, str]:
-    return {"name": settings.app_name, "health": f"{settings.api_prefix}/health"}
+FRONTEND_DIST_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+DISABLED_DOCUMENTATION_PATHS = {"docs", "redoc", "openapi.json"}
 
 
 @app.get(f"{settings.api_prefix}/health", response_model=HealthResponse)
@@ -76,6 +75,7 @@ def list_index_funds(
         index=index,
         items=funds,
         total=len(funds),
+        last_synced_at=repository.get_last_synced_at(index_id),
         generated_at=datetime.now(UTC),
         data_mode=settings.data_mode,
     )
@@ -125,4 +125,29 @@ def get_fund_nav(fund_code: str, repository: RepositoryDep) -> NavSeriesResponse
         items=repository.get_nav(fund_code),
         source_name=fund.source_name,
         generated_at=datetime.now(UTC),
+    )
+
+
+@app.get("/{requested_path:path}", include_in_schema=False)
+def frontend(requested_path: str) -> FileResponse:
+    """Serve the production frontend and fall back to index.html for SPA routes."""
+    if requested_path in DISABLED_DOCUMENTATION_PATHS:
+        raise HTTPException(status_code=404, detail="Not found")
+    if requested_path == settings.api_prefix.lstrip("/") or requested_path.startswith(
+        f"{settings.api_prefix.lstrip('/')}/"
+    ):
+        raise HTTPException(status_code=404, detail="API route not found")
+
+    dist_dir = FRONTEND_DIST_DIR.resolve()
+    requested_file = (dist_dir / requested_path).resolve()
+    if requested_path and requested_file.is_relative_to(dist_dir) and requested_file.is_file():
+        return FileResponse(requested_file)
+
+    index_file = dist_dir / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
+
+    raise HTTPException(
+        status_code=503,
+        detail="Frontend build is missing; run `pnpm build` in frontend/.",
     )
