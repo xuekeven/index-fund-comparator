@@ -140,7 +140,7 @@ export function ComparisonView({
                   ))}
                 </tr>
                 <tr>
-                  <th>同日估算偏离</th>
+                  <th>同日偏离</th>
                   {funds.map((fund) => (
                     <td key={fund.id}>
                       <Value muted={fund.estimatedDeviation === null}>{formatPercent(fund.estimatedDeviation, true)}</Value>
@@ -157,12 +157,23 @@ export function ComparisonView({
                   ))}
                 </tr>
                 <tr>
+                  <th>基金规模</th>
+                  {funds.map((fund) => (
+                    <td key={fund.id}>
+                      <Value>{fund.scaleBillionCny === null ? "—" : `${fund.scaleBillionCny.toFixed(2)} 亿元`}</Value>
+                      <small>{formatDate(fund.scaleDate)}</small>
+                    </td>
+                  ))}
+                </tr>
+                <tr>
                   <th>销售服务费</th>
                   {funds.map((fund) => <td key={fund.id}>{formatPercent(fund.salesServiceFee)}</td>)}
                 </tr>
                 {[
                   ["近1月收益", "1月"],
-                  ["今年以来收益", "年初至今"],
+                  ["近3月收益", "3月"],
+                  ["近6月收益", "6月"],
+                  ["今年来收益", "今年来"],
                   ["近1年收益", "1年"],
                 ].map(([label, period]) => (
                   <tr key={period}>
@@ -174,19 +185,6 @@ export function ComparisonView({
                     ))}
                   </tr>
                 ))}
-                <tr>
-                  <th>近1年跟踪误差</th>
-                  {funds.map((fund) => <td key={fund.id}>{formatPercent(fund.trackingError1y)}</td>)}
-                </tr>
-                <tr>
-                  <th>基金规模</th>
-                  {funds.map((fund) => (
-                    <td key={fund.id}>
-                      <Value>{fund.scaleBillionCny === null ? "—" : `${fund.scaleBillionCny.toFixed(2)} 亿元`}</Value>
-                      <small>{formatDate(fund.scaleDate)}</small>
-                    </td>
-                  ))}
-                </tr>
                 <tr>
                   <th>数据来源</th>
                   {funds.map((fund) => (

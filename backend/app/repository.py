@@ -28,7 +28,8 @@ from app.models import DataStatus, FundComparisonRow, IndexSummary, MetricValue,
 RETURN_PERIOD_LABELS = {
     "return_1m": "1月",
     "return_3m": "3月",
-    "return_ytd": "年初至今",
+    "return_6m": "6月",
+    "return_ytd": "今年来",
     "return_1y": "1年",
 }
 
@@ -499,8 +500,6 @@ class PostgresFundRepository(FundRepository):
             for code, label in RETURN_PERIOD_LABELS.items()
             if (metric := latest_metrics.get(code)) is not None
         ]
-        tracking_error = latest_metrics.get("tracking_error_1y")
-
         return FundComparisonRow(
             id=f"share-{row['share_id']}",
             product_id=f"product-{row['product_id']}",
@@ -530,11 +529,6 @@ class PostgresFundRepository(FundRepository):
             ),
             scale_date=row["scale_date"],
             returns=returns,
-            tracking_error_1y=(
-                float(tracking_error.value)
-                if tracking_error is not None and tracking_error.value is not None
-                else None
-            ),
             data_status=self._status(row["share_quality"]),
             source_name=row["source_name"],
             source_url=row["source_url"],

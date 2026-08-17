@@ -91,7 +91,6 @@ class FundComparisonRow(ApiModel):
     scale_billion_cny: float | None = None
     scale_date: date | None = None
     returns: list[MetricValue]
-    tracking_error_1y: float | None = None
     data_status: DataStatus = DataStatus.SAMPLE
     source_name: str | None = None
     source_url: str | None = None

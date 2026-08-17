@@ -47,7 +47,6 @@ export interface FundComparisonRow {
   scaleBillionCny: number | null;
   scaleDate: string | null;
   returns: MetricValue[];
-  trackingError1y: number | null;
   dataStatus: DataStatus;
   sourceName: string | null;
   sourceUrl: string | null;

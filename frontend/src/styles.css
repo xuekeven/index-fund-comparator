@@ -120,15 +120,15 @@ a { color: inherit; text-decoration: none; }
 .search-box input::placeholder { color: #a1aaa5; }
 .search-box button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; background: transparent; cursor: pointer; }
 .search-box button svg { width: 15px; }
-.fund-result-summary { margin: -7px 2px 10px; display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 11px; }
-.fund-result-count, .fund-last-synced { margin: 0; }
-.fund-result-count strong { color: var(--green-dark); font-size: 13px; font-variant-numeric: tabular-nums; }
-.fund-last-synced { display: flex; align-items: center; gap: 7px; }
-.fund-last-synced .status-dot { width: 6px; height: 6px; box-shadow: 0 0 0 3px rgba(36,166,106,.1); }
+.fund-result-summary { margin: -7px 2px 10px; display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 13px; }
+.fund-result-count, .fund-last-synced, .fund-trade-date { margin: 0; }
+.fund-result-count strong { color: var(--green-dark); font-size: 15px; font-variant-numeric: tabular-nums; }
+.fund-last-synced, .fund-trade-date { display: flex; align-items: center; gap: 7px; }
+.fund-result-summary .status-dot { width: 6px; height: 6px; box-shadow: 0 0 0 3px rgba(36,166,106,.1); }
 
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 16px; }
-.fund-table { width: 100%; min-width: 1080px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
-.fund-table th { padding: 13px 12px; color: #65716b; background: #f7f9f7; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 650; letter-spacing: .03em; text-align: right; white-space: nowrap; }
+.fund-table { width: 100%; min-width: 1080px; border-collapse: collapse; table-layout: fixed; font-size: 14px; }
+.fund-table th { padding: 13px 12px; color: #65716b; background: #f7f9f7; border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 650; letter-spacing: .03em; text-align: right; white-space: nowrap; }
 .fund-table th:nth-child(2), .fund-table th:nth-child(3), .fund-table th:nth-child(4) { text-align: left; }
 .fund-table th small { color: #919b96; font-size: 10px; font-weight: 500; }
 .sortable-header { padding: 0; display: inline-flex; align-items: center; gap: 4px; border: 0; color: inherit; background: transparent; font: inherit; font-weight: inherit; letter-spacing: inherit; cursor: pointer; }
@@ -150,33 +150,32 @@ a { color: inherit; text-decoration: none; }
 .fund-table tbody tr.selected td { background: #f2faf5; }
 .fund-table th.select-column, .fund-table td.select-column { width: 42px; padding-right: 4px; text-align: center; }
 .fund-table th.code-column, .fund-table td.code-column { width: 76px; text-align: left; }
-.code-column span { color: #4f5f57; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+.code-column span { color: #4f5f57; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 .fund-code-link { color: var(--green-dark); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; text-decoration: underline; text-decoration-color: rgba(7,90,56,.28); text-underline-offset: 3px; }
 .fund-code-link:hover { color: var(--green); text-decoration-color: currentColor; }
 .fund-table th.fund-column, .fund-table td.fund-cell { width: 180px; min-width: 180px; max-width: 180px; }
 .fund-cell { text-align: left !important; }
 .fund-name-row { display: flex; align-items: flex-start; gap: 7px; }
 .fund-name-row strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.45; }
-.fund-company { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; }
+.fund-company { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
 .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .tags span { padding: 3px 6px; border: 1px solid #e1e6e3; border-radius: 5px; color: #748078; background: white; font-size: 9px; }
-.price-cell { width: 128px; min-width: 128px; text-align: left !important; }
+.price-cell { width: 112px; min-width: 112px; text-align: left !important; }
 .price-cell > div { display: grid; grid-template-columns: 31px auto; align-items: start; gap: 5px; margin-bottom: 6px; }
 .price-value { display: flex; align-items: flex-start; flex-direction: column; }
-.price-value small { margin-top: 4px; white-space: nowrap; }
-.price-cell span, .price-cell small { color: var(--muted); font-size: 9px; }
-.price-cell strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.price-cell em { display: inline-block; margin-top: 2px; font-size: 9px; font-style: normal; }
-.fee-cell strong { display: block; font-size: 13px; }
+.price-cell span, .price-cell small { color: var(--muted); font-size: 11px; }
+.price-cell strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+.price-cell em { display: inline-block; margin-top: 2px; font-size: 11px; font-style: normal; }
+.fee-cell strong { display: block; font-size: 15px; }
 .fund-table th.fee-column, .fund-table td.fee-cell { width: 92px; min-width: 92px; max-width: 92px; }
-.fee-cell small { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.fee-cell small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .positive { color: var(--red); font-weight: 650; }
 .negative { color: var(--green); font-weight: 650; }
 .muted { color: #9aa39e; }
 .warn { color: var(--amber); }
 .pending-value { display: inline-block; padding: 4px 6px; border-radius: 6px; color: #8b7340; background: #faf3e3; font-size: 9px; }
-.scale-cell strong, .scale-cell small { display: block; }
-.scale-cell small { margin-top: 4px; color: var(--muted); font-size: 9px; }
+.scale-cell strong { display: block; }
+.scale-cell small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
 .source-link { width: 28px; height: 28px; display: inline-grid; place-items: center; border-radius: 8px; color: #7b8881; }
 .source-link:hover { color: var(--green); background: var(--green-soft); }
 .source-link svg { width: 14px; }

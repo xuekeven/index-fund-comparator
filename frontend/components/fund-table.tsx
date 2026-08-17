@@ -7,7 +7,15 @@ interface FundListProps {
   onToggle: (code: string) => void;
 }
 
-export type FundSortKey = "code" | "expenseRate" | "scale";
+export type FundSortKey =
+  | "code"
+  | "expenseRate"
+  | "scale"
+  | "return1m"
+  | "return3m"
+  | "return6m"
+  | "returnYtd"
+  | "return1y";
 export type SortDirection = "asc" | "desc";
 
 interface FundTableProps extends FundListProps {
@@ -31,11 +39,6 @@ function formatFee(value: number | null) {
 
 function getReturn(fund: FundComparisonRow, period: string) {
   return fund.returns.find((item) => item.period === period)?.value ?? null;
-}
-
-function dateLabel(value: string | null) {
-  if (!value) return "暂无日期";
-  return value.slice(5).replace("-", "/");
 }
 
 function ReturnValue({ value }: { value: number | null }) {
@@ -105,13 +108,23 @@ export function FundTable({
             <th className="fee-column" aria-sort={sortKey === "expenseRate" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
               <SortableHeader label="运作费率" sortKey="expenseRate" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
             </th>
-            <th>近1月</th>
-            <th>今年以来</th>
-            <th>近1年</th>
-            <th>跟踪误差<br /><small>近1年</small></th>
-            <th aria-sort={sortKey === "scale" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+            <th className="scale-column" aria-sort={sortKey === "scale" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
               <SortableHeader label="基金规模" sortKey="scale" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
-              <br /><small>亿元</small>
+            </th>
+            <th aria-sort={sortKey === "return1m" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="近1月" sortKey="return1m" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+            </th>
+            <th aria-sort={sortKey === "return3m" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="近3月" sortKey="return3m" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+            </th>
+            <th aria-sort={sortKey === "return6m" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="近6月" sortKey="return6m" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+            </th>
+            <th aria-sort={sortKey === "returnYtd" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="今年来" sortKey="returnYtd" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+            </th>
+            <th aria-sort={sortKey === "return1y" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+              <SortableHeader label="近1年" sortKey="return1y" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
             </th>
           </tr>
         </thead>
@@ -150,7 +163,6 @@ export function FundTable({
                       <span>收盘</span>
                       <div className="price-value">
                         <strong>{formatNumber(fund.closePrice, 3)}</strong>
-                        <small title="该收盘价对应的交易日期">交易日 {dateLabel(fund.closeDate)}</small>
                       </div>
                     </div>
                   )}
@@ -158,10 +170,9 @@ export function FundTable({
                     <span>净值</span>
                     <div className="price-value">
                       <strong>{formatNumber(fund.nav)}</strong>
-                      <small title="该单位净值对应的净值日期">净值日 {dateLabel(fund.navDate)}</small>
                     </div>
                   </div>
-                  {fund.estimatedDeviation !== null && <em className={fund.estimatedDeviation >= 0 ? "warn" : "negative"}>估算偏离 {formatPercent(fund.estimatedDeviation)}</em>}
+                  {fund.estimatedDeviation !== null && <em className={fund.estimatedDeviation >= 0 ? "warn" : "negative"}>偏离 {formatPercent(fund.estimatedDeviation)}</em>}
                 </td>
                 <td className="fee-cell">
                   <strong>{fund.expenseRate === null ? "—" : `${fund.expenseRate.toFixed(2)}%`}</strong>
@@ -169,11 +180,15 @@ export function FundTable({
                   <small>托管 {formatFee(fund.custodyFee)}</small>
                   {fund.salesServiceFee !== null && <small>销售服务 {formatFee(fund.salesServiceFee)}</small>}
                 </td>
+                <td className="scale-cell">
+                  <strong>{fund.scaleBillionCny?.toFixed(2) ?? "—"}</strong>
+                  <small>亿元</small>
+                </td>
                 <td><ReturnValue value={getReturn(fund, "1月")} /></td>
-                <td><ReturnValue value={getReturn(fund, "年初至今")} /></td>
+                <td><ReturnValue value={getReturn(fund, "3月")} /></td>
+                <td><ReturnValue value={getReturn(fund, "6月")} /></td>
+                <td><ReturnValue value={getReturn(fund, "今年来")} /></td>
                 <td><ReturnValue value={getReturn(fund, "1年")} /></td>
-                <td>{fund.trackingError1y === null ? <span className="pending-value">待核验</span> : <span>{fund.trackingError1y.toFixed(2)}%</span>}</td>
-                <td className="scale-cell"><strong>{fund.scaleBillionCny?.toFixed(2) ?? "—"}</strong><small>{dateLabel(fund.scaleDate)}</small></td>
               </tr>
             );
           })}
@@ -214,14 +229,16 @@ export function FundCards({ funds, selected, onToggle }: FundListProps) {
             <div className="tags"><span>{fund.productStructure}</span>{fund.investmentScope.map((item) => <span key={item}>{item}</span>)}{fund.exchange && <span>{fund.exchange}</span>}</div>
             <div className="card-primary">
               <div><small>近1年收益</small><ReturnValue value={getReturn(fund, "1年")} /></div>
-              <div><small>今年以来</small><ReturnValue value={getReturn(fund, "年初至今")} /></div>
+              <div><small>今年来</small><ReturnValue value={getReturn(fund, "今年来")} /></div>
               <div><small>运作费率</small><strong>{fund.expenseRate === null ? "—" : `${fund.expenseRate.toFixed(2)}%`}</strong></div>
             </div>
             <div className="card-details">
-              <div><span>最新净值 <small>{dateLabel(fund.navDate)}</small></span><strong>{formatNumber(fund.nav)}</strong></div>
-              {fund.closePrice !== null && <div><span>收盘价 <small>{dateLabel(fund.closeDate)}</small></span><strong>{formatNumber(fund.closePrice, 3)}</strong></div>}
-              <div><span>基金规模 <small>{dateLabel(fund.scaleDate)}</small></span><strong>{fund.scaleBillionCny?.toFixed(2) ?? "—"} 亿</strong></div>
-              <div><span>近1年跟踪误差</span><strong>{fund.trackingError1y === null ? "待核验" : `${fund.trackingError1y.toFixed(2)}%`}</strong></div>
+              <div><span>最新净值</span><strong>{formatNumber(fund.nav)}</strong></div>
+              {fund.closePrice !== null && <div><span>收盘价</span><strong>{formatNumber(fund.closePrice, 3)}</strong></div>}
+              <div><span>基金规模</span><strong>{fund.scaleBillionCny?.toFixed(2) ?? "—"} 亿</strong></div>
+              <div><span>近1月</span><ReturnValue value={getReturn(fund, "1月")} /></div>
+              <div><span>近3月</span><ReturnValue value={getReturn(fund, "3月")} /></div>
+              <div><span>近6月</span><ReturnValue value={getReturn(fund, "6月")} /></div>
             </div>
           </article>
         );

@@ -21,7 +21,7 @@ dev = [
 
 [project.scripts]
 ifc-sync-sse = "app.sync.sse_funds:main"
-ifc-sync-sse-quotes = "app.sync.sse_quotes:main"
+ifc-sync-sse-details = "app.sync.sse_details:main"
 ifc-sync-szse = "app.sync.szse_funds:main"
 ifc-sync-szse-quotes = "app.sync.szse_quotes:main"
 ifc-sync-csrc = "app.sync.csrc_funds:main"

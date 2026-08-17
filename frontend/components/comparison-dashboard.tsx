@@ -18,11 +18,73 @@ type ExchangeFilter = "全部" | "深交所" | "上交所";
 
 const VENUES: VenueFilter[] = ["全部", "场内", "场外"];
 const EXCHANGES: Exclude<ExchangeFilter, "全部">[] = ["深交所", "上交所"];
+const FILTER_PREFERENCES_KEY = "index-fund-comparator:filters:v1";
 
 type CachedFunds = {
   items: FundComparisonRow[];
   lastSyncedAt: Date | null;
 };
+
+type FilterPreferences = {
+  activeIndex: string;
+  venue: VenueFilter;
+  exchanges: string[];
+  shareClasses: string[];
+  currencies: string[];
+};
+
+const DEFAULT_FILTER_PREFERENCES: FilterPreferences = {
+  activeIndex: "csi-500",
+  venue: "全部",
+  exchanges: [],
+  shareClasses: [],
+  currencies: [],
+};
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function readFilterPreferences(): FilterPreferences {
+  if (typeof window === "undefined") return DEFAULT_FILTER_PREFERENCES;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(FILTER_PREFERENCES_KEY) ?? "null");
+    if (!parsed || typeof parsed !== "object") return DEFAULT_FILTER_PREFERENCES;
+    const value = parsed as Partial<FilterPreferences>;
+    const venue = VENUES.includes(value.venue as VenueFilter)
+      ? value.venue as VenueFilter
+      : "全部";
+    return {
+      activeIndex: typeof value.activeIndex === "string" && value.activeIndex
+        ? value.activeIndex
+        : DEFAULT_FILTER_PREFERENCES.activeIndex,
+      venue,
+      exchanges: venue === "场内"
+        ? stringArray(value.exchanges).filter((item) => EXCHANGES.some((value) => value === item))
+        : [],
+      shareClasses: venue === "场外" ? stringArray(value.shareClasses) : [],
+      currencies: venue === "场外" ? stringArray(value.currencies) : [],
+    };
+  } catch {
+    return DEFAULT_FILTER_PREFERENCES;
+  }
+}
+
+function writeFilterPreferences(preferences: FilterPreferences) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(FILTER_PREFERENCES_KEY, JSON.stringify(preferences));
+  } catch {
+    // Storage can be unavailable in private mode or blocked by browser policy.
+  }
+}
+
+function keepAvailable(current: string[], available: string[]) {
+  const next = current.filter((item) => available.includes(item));
+  return next.length === current.length ? current : next;
+}
 
 function formatSyncTime(value: Date | null) {
   if (!value) return "尚未同步";
@@ -33,6 +95,27 @@ function formatSyncTime(value: Date | null) {
     minute: "2-digit",
     hour12: false,
   }).format(value);
+}
+
+function formatTradeDate(value: string | null) {
+  if (!value) return "暂无交易日";
+  return value.slice(5).replace("-", "/");
+}
+
+const RETURN_PERIOD_BY_SORT_KEY: Partial<Record<FundSortKey, string>> = {
+  return1m: "1月",
+  return3m: "3月",
+  return6m: "6月",
+  returnYtd: "今年来",
+  return1y: "1年",
+};
+
+function fundSortValue(fund: FundComparisonRow, key: FundSortKey): number | null {
+  if (key === "expenseRate") return fund.expenseRate;
+  if (key === "scale") return fund.scaleBillionCny;
+  const period = RETURN_PERIOD_BY_SORT_KEY[key];
+  if (!period) return null;
+  return fund.returns.find((item) => item.period === period)?.value ?? null;
 }
 
 function comparisonScopeText(index: IndexSummary) {
@@ -111,12 +194,13 @@ function MultiSelectFilter({
 }
 
 export function ComparisonDashboard() {
+  const [initialFilters] = useState(readFilterPreferences);
   const [indices, setIndices] = useState<IndexSummary[]>([]);
-  const [activeIndex, setActiveIndex] = useState("csi-500");
-  const [venue, setVenue] = useState<VenueFilter>("全部");
-  const [exchanges, setExchanges] = useState<string[]>([]);
-  const [shareClasses, setShareClasses] = useState<string[]>([]);
-  const [currencies, setCurrencies] = useState<string[]>([]);
+  const [activeIndex, setActiveIndex] = useState(initialFilters.activeIndex);
+  const [venue, setVenue] = useState<VenueFilter>(initialFilters.venue);
+  const [exchanges, setExchanges] = useState<string[]>(initialFilters.exchanges);
+  const [shareClasses, setShareClasses] = useState<string[]>(initialFilters.shareClasses);
+  const [currencies, setCurrencies] = useState<string[]>(initialFilters.currencies);
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<FundSortKey | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -194,6 +278,16 @@ export function ComparisonDashboard() {
     queueMicrotask(() => loadFunds(controller.signal));
     return () => controller.abort();
   }, [loadFunds]);
+  useEffect(() => {
+    writeFilterPreferences({
+      activeIndex,
+      venue,
+      exchanges,
+      shareClasses,
+      currencies,
+    });
+  }, [activeIndex, currencies, exchanges, shareClasses, venue]);
+
 
   useEffect(() => () => comparisonController.current?.abort(), []);
 
@@ -230,6 +324,14 @@ export function ComparisonDashboard() {
       .sort((left, right) => left.localeCompare(right, "zh-CN")),
     [funds],
   );
+  useEffect(() => {
+    if (venue !== "场外" || funds.length === 0) return;
+    queueMicrotask(() => {
+      setShareClasses((current) => keepAvailable(current, shareClassOptions));
+      setCurrencies((current) => keepAvailable(current, currencyOptions));
+    });
+  }, [currencyOptions, funds.length, shareClassOptions, venue]);
+
   const visibleFunds = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return funds.filter((fund) => {
@@ -251,6 +353,15 @@ export function ComparisonDashboard() {
     });
   }, [currencies, exchanges, funds, query, shareClasses, venue]);
 
+  const tradeDate = useMemo(() => {
+    const dates = visibleFunds.flatMap((fund) =>
+      [fund.closeDate, fund.navDate, fund.scaleDate].filter(
+        (value): value is string => value !== null,
+      ),
+    );
+    return dates.length > 0 ? dates.sort().at(-1) ?? null : null;
+  }, [visibleFunds]);
+
   const sortedFunds = useMemo(() => {
     if (!sortKey) return visibleFunds;
 
@@ -267,12 +378,8 @@ export function ComparisonDashboard() {
             : sortDirection === "asc" ? comparison : -comparison;
         }
 
-        const leftValue = sortKey === "expenseRate"
-          ? left.expenseRate
-          : left.scaleBillionCny;
-        const rightValue = sortKey === "expenseRate"
-          ? right.expenseRate
-          : right.scaleBillionCny;
+        const leftValue = fundSortValue(left, sortKey);
+        const rightValue = fundSortValue(right, sortKey);
         if (leftValue === null && rightValue === null) {
           return leftItem.originalIndex - rightItem.originalIndex;
         }
@@ -514,7 +621,11 @@ export function ComparisonDashboard() {
               </p>
               <p className="fund-last-synced">
                 <span className="status-dot" />
-                最后同步 {formatSyncTime(lastSyncedAt)}
+                同步时间 {formatSyncTime(lastSyncedAt)}
+              </p>
+              <p className="fund-trade-date">
+                <span className="status-dot" />
+                交易日 {formatTradeDate(tradeDate)}
               </p>
             </div>
           )}
@@ -550,7 +661,7 @@ export function ComparisonDashboard() {
           )}
 
           <p className="table-footnote">
-            仅当收盘价和净值日期一致时，展示“收盘价 ÷ 单位净值 − 1”的同日估算偏离。
+            仅当收盘价和净值日期一致时，展示“收盘价 ÷ 单位净值 − 1”的同日偏离。
           </p>
         </section>
       </main>
