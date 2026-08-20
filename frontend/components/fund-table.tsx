@@ -1,4 +1,5 @@
 import { getFundDetailUrl } from "@/lib/fund-links";
+import type { FundSortKey, SortDirection } from "@/lib/fund-list";
 import type { FundComparisonRow } from "@/lib/types";
 
 interface FundListProps {
@@ -6,17 +7,6 @@ interface FundListProps {
   selected: string[];
   onToggle: (code: string) => void;
 }
-
-export type FundSortKey =
-  | "code"
-  | "expenseRate"
-  | "scale"
-  | "return1m"
-  | "return3m"
-  | "return6m"
-  | "returnYtd"
-  | "return1y";
-export type SortDirection = "asc" | "desc";
 
 interface FundTableProps extends FundListProps {
   sortKey: FundSortKey | null;

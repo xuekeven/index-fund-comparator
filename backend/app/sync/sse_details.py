@@ -1,5 +1,6 @@
 import argparse
 import calendar
+import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
@@ -8,6 +9,7 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_session_factory
@@ -47,6 +49,7 @@ SSE_SNAPSHOT_SELECT = (
 )
 TARGET_FAMILY_IDS = tuple(target.family_id for target in TARGETS)
 RETURN_CALCULATION_VERSION = "sse-iopv-simple-return-v1"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -430,81 +433,96 @@ def run_sync(*, dry_run: bool = False) -> tuple[int, list[date]]:
             raise RuntimeError("No active target SSE listings found; run script A first")
 
         trade_dates: set[date] = set()
+        synced = 0
+        failures: list[str] = []
         for listing, share_id, product_id, index_definition_id in rows:
-            detail_url = (
-                listing.source_url
-                if listing.source_url
-                and "funddetail/index.shtml" in listing.source_url
-                else sse_detail_url(listing.ticker)
-            )
-            detail = fetch_detail_info(client, listing.ticker, detail_url)
-            snapshot = fetch_snapshot(client, listing.ticker, detail_url)
-            if snapshot.code != listing.ticker:
-                raise RuntimeError(
-                    f"SSE detail code mismatch: {listing.ticker} != {snapshot.code}"
+            try:
+                detail_url = (
+                    listing.source_url
+                    if listing.source_url
+                    and "funddetail/index.shtml" in listing.source_url
+                    else sse_detail_url(listing.ticker)
                 )
+                detail = fetch_detail_info(client, listing.ticker, detail_url)
+                snapshot = fetch_snapshot(client, listing.ticker, detail_url)
+                if snapshot.code != listing.ticker:
+                    raise RuntimeError(
+                        f"SSE detail code mismatch: {listing.ticker} != {snapshot.code}"
+                    )
+                metric_source_url = detail_url
+                history: list[SseNavRecord] = []
+                if needs_nav_history_backfill(session, share_id):
+                    history, metric_source_url = fetch_nav_history(
+                        client, listing.ticker, detail_url
+                    )
 
-            sync_fee_history(
-                session,
-                share_id,
-                detail.fee_rates,
-                collected_at,
-                detail_url,
-            )
-            sync_nav_daily(
-                session,
-                share_id,
-                SseNavRecord(
-                    code=snapshot.code,
-                    nav_date=snapshot.trade_date,
-                    unit_nav=snapshot.nav,
-                ),
-                collected_at,
-                detail_url,
-            )
-            metric_source_url = detail_url
-            if needs_nav_history_backfill(session, share_id):
-                history, metric_source_url = fetch_nav_history(
-                    client, listing.ticker, detail_url
-                )
-                for record in history:
+                with session.begin_nested():
+                    sync_fee_history(
+                        session,
+                        share_id,
+                        detail.fee_rates,
+                        collected_at,
+                        detail_url,
+                    )
                     sync_nav_daily(
                         session,
                         share_id,
-                        record,
+                        SseNavRecord(
+                            code=snapshot.code,
+                            nav_date=snapshot.trade_date,
+                            unit_nav=snapshot.nav,
+                        ),
+                        collected_at,
+                        detail_url,
+                    )
+                    for record in history:
+                        sync_nav_daily(
+                            session,
+                            share_id,
+                            record,
+                            collected_at,
+                            metric_source_url,
+                        )
+                    sync_return_metrics(
+                        session,
+                        share_id,
+                        index_definition_id,
+                        calculate_return_metrics(load_nav_records(session, share_id)),
                         collected_at,
                         metric_source_url,
                     )
-            sync_return_metrics(
-                session,
-                share_id,
-                index_definition_id,
-                calculate_return_metrics(load_nav_records(session, share_id)),
-                collected_at,
-                metric_source_url,
-            )
-            sync_quote(
-                session,
-                listing.id,
-                snapshot,
-                collected_at,
-                detail_url,
-            )
-            sync_scale(
-                session,
-                product_id,
-                snapshot.trade_date,
-                detail.scale_yi,
-                collected_at,
-                detail_url,
-            )
-            trade_dates.add(snapshot.trade_date)
+                    sync_quote(
+                        session,
+                        listing.id,
+                        snapshot,
+                        collected_at,
+                        detail_url,
+                    )
+                    sync_scale(
+                        session,
+                        product_id,
+                        snapshot.trade_date,
+                        detail.scale_yi,
+                        collected_at,
+                        detail_url,
+                    )
+                synced += 1
+                trade_dates.add(snapshot.trade_date)
+            except (httpx.HTTPError, RuntimeError, ValueError, SQLAlchemyError) as exc:
+                failures.append(f"{listing.ticker}: {exc}")
+
+        if synced == 0:
+            session.rollback()
+            details = "; ".join(failures[:3])
+            raise RuntimeError(f"SSE detail sync produced no results: {details}")
+        for failure in failures:
+            logger.warning("SSE detail sync skipped %s", failure)
 
         if dry_run:
             session.rollback()
         else:
             session.commit()
-    return len(rows), sorted(trade_dates)
+    return synced, sorted(trade_dates)
 
 
 def main() -> None:

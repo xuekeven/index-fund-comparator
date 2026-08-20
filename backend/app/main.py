@@ -1,10 +1,11 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings, get_settings
 from app.models import (
@@ -41,6 +42,25 @@ DISABLED_DOCUMENTATION_PATHS = {"docs", "redoc", "openapi.json"}
 
 @app.get(f"{settings.api_prefix}/health", response_model=HealthResponse)
 def health(current_settings: Annotated[Settings, Depends(get_settings)]) -> HealthResponse:
+    return HealthResponse(
+        status="ok",
+        version=current_settings.app_version,
+        data_mode=current_settings.data_mode,
+        checked_at=datetime.now(UTC),
+    )
+
+
+@app.get(f"{settings.api_prefix}/health/ready", response_model=HealthResponse)
+def readiness(
+    repository: RepositoryDep,
+    current_settings: Annotated[Settings, Depends(get_settings)],
+) -> HealthResponse:
+    try:
+        ready = repository.is_ready()
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Data service is unavailable") from exc
+    if not ready:
+        raise HTTPException(status_code=503, detail="Data service is unavailable")
     return HealthResponse(
         status="ok",
         version=current_settings.app_version,
@@ -93,8 +113,8 @@ def compare_funds(
         raise HTTPException(status_code=422, detail="At least two distinct fund codes are required")
 
     items = repository.get_funds(unique_codes)
-    if not items:
-        raise HTTPException(status_code=404, detail="No matching funds")
+    if len(items) < 2:
+        raise HTTPException(status_code=404, detail="Fewer than two matching funds")
 
     missing = sorted(set(unique_codes) - {item.code for item in items})
     index_ids = {item.index_id for item in items}
@@ -116,13 +136,21 @@ def compare_funds(
 
 
 @app.get(f"{settings.api_prefix}/funds/{{fund_code}}/nav", response_model=NavSeriesResponse)
-def get_fund_nav(fund_code: str, repository: RepositoryDep) -> NavSeriesResponse:
+def get_fund_nav(
+    fund_code: str,
+    repository: RepositoryDep,
+    start_date: Annotated[date | None, Query(alias="startDate")] = None,
+    end_date: Annotated[date | None, Query(alias="endDate")] = None,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 1000,
+) -> NavSeriesResponse:
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(status_code=422, detail="startDate must not be after endDate")
     fund = repository.get_fund(fund_code)
     if fund is None:
         raise HTTPException(status_code=404, detail="Fund not found")
     return NavSeriesResponse(
         fund_code=fund_code,
-        items=repository.get_nav(fund_code),
+        items=repository.get_nav(fund_code, start_date, end_date, limit),
         source_name=fund.source_name,
         generated_at=datetime.now(UTC),
     )
@@ -141,11 +169,14 @@ def frontend(requested_path: str) -> FileResponse:
     dist_dir = FRONTEND_DIST_DIR.resolve()
     requested_file = (dist_dir / requested_path).resolve()
     if requested_path and requested_file.is_relative_to(dist_dir) and requested_file.is_file():
-        return FileResponse(requested_file)
+        response = FileResponse(requested_file)
+        if requested_path.startswith("assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
     index_file = dist_dir / "index.html"
     if index_file.is_file():
-        return FileResponse(index_file)
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
 
     raise HTTPException(
         status_code=503,

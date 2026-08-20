@@ -79,7 +79,16 @@ class FundRepository(ABC):
     def get_funds(self, codes: list[str]) -> list[FundComparisonRow]: ...
 
     @abstractmethod
-    def get_nav(self, code: str) -> list[NavPoint]: ...
+    def get_nav(
+        self,
+        code: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        limit: int = 1000,
+    ) -> list[NavPoint]: ...
+
+    @abstractmethod
+    def is_ready(self) -> bool: ...
 
 
 class SampleFundRepository(FundRepository):
@@ -114,7 +123,13 @@ class SampleFundRepository(FundRepository):
         funds_by_code = {fund.code: fund for fund in self._funds}
         return [funds_by_code[code] for code in codes if code in funds_by_code]
 
-    def get_nav(self, code: str) -> list[NavPoint]:
+    def get_nav(
+        self,
+        code: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        limit: int = 1000,
+    ) -> list[NavPoint]:
         fund = self.get_fund(code)
         if fund is None or fund.nav is None or fund.nav_date is None:
             return []
@@ -131,7 +146,7 @@ class SampleFundRepository(FundRepository):
                 dates.append(cursor)
             cursor -= timedelta(days=1)
 
-        return [
+        points = [
             NavPoint(
                 date=point_date,
                 value=round(fund.nav / ((1 + daily_step) ** (29 - position)), 4),
@@ -142,6 +157,15 @@ class SampleFundRepository(FundRepository):
             )
             for position, point_date in enumerate(reversed(dates))
         ]
+        return [
+            point
+            for point in points
+            if (start_date is None or point.date >= start_date)
+            and (end_date is None or point.date <= end_date)
+        ][-limit:]
+
+    def is_ready(self) -> bool:
+        return True
 
 
 class PostgresFundRepository(FundRepository):
@@ -201,30 +225,30 @@ class PostgresFundRepository(FundRepository):
 
     def get_last_synced_at(self, index_id: str) -> datetime | None:
         statements = (
-            select(FundProduct.collected_at.label("collected_at"))
+            select(func.max(FundProduct.collected_at).label("collected_at"))
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
             .where(IndexDefinition.family_id == index_id),
-            select(FundShareClass.collected_at.label("collected_at"))
+            select(func.max(FundShareClass.collected_at).label("collected_at"))
             .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
             .where(IndexDefinition.family_id == index_id),
-            select(FundListing.collected_at.label("collected_at"))
+            select(func.max(FundListing.collected_at).label("collected_at"))
             .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
             .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
             .where(IndexDefinition.family_id == index_id),
-            select(NavDaily.collected_at.label("collected_at"))
+            select(func.max(NavDaily.collected_at).label("collected_at"))
             .join(FundShareClass, NavDaily.fund_share_class_id == FundShareClass.id)
             .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
             .where(IndexDefinition.family_id == index_id),
-            select(MarketQuote.collected_at.label("collected_at"))
+            select(func.max(MarketQuote.collected_at).label("collected_at"))
             .join(FundListing, MarketQuote.fund_listing_id == FundListing.id)
             .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
             .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
             .where(IndexDefinition.family_id == index_id),
-            select(FundScale.collected_at.label("collected_at"))
+            select(func.max(FundScale.collected_at).label("collected_at"))
             .outerjoin(FundShareClass, FundScale.fund_share_class_id == FundShareClass.id)
             .join(
                 FundProduct,
@@ -235,12 +259,12 @@ class PostgresFundRepository(FundRepository):
             )
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
             .where(IndexDefinition.family_id == index_id),
-            select(FeeHistory.collected_at.label("collected_at"))
+            select(func.max(FeeHistory.collected_at).label("collected_at"))
             .join(FundShareClass, FeeHistory.fund_share_class_id == FundShareClass.id)
             .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
             .where(IndexDefinition.family_id == index_id),
-            select(CalculatedMetric.collected_at.label("collected_at"))
+            select(func.max(CalculatedMetric.collected_at).label("collected_at"))
             .join(FundShareClass, CalculatedMetric.fund_share_class_id == FundShareClass.id)
             .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
@@ -296,7 +320,13 @@ class PostgresFundRepository(FundRepository):
             }
             return [funds_by_code[code] for code in codes if code in funds_by_code]
 
-    def get_nav(self, code: str) -> list[NavPoint]:
+    def get_nav(
+        self,
+        code: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        limit: int = 1000,
+    ) -> list[NavPoint]:
         with self._session_factory() as session:
             share_id = session.scalar(
                 select(FundShareClass.id)
@@ -305,11 +335,16 @@ class PostgresFundRepository(FundRepository):
             )
             if share_id is None:
                 return []
-            rows = session.execute(
-                select(NavDaily)
-                .where(NavDaily.fund_share_class_id == share_id)
-                .order_by(NavDaily.nav_date)
-            ).scalars()
+            statement = select(NavDaily).where(NavDaily.fund_share_class_id == share_id)
+            if start_date is not None:
+                statement = statement.where(NavDaily.nav_date >= start_date)
+            if end_date is not None:
+                statement = statement.where(NavDaily.nav_date <= end_date)
+            rows = list(
+                session.execute(
+                    statement.order_by(NavDaily.nav_date.desc()).limit(limit)
+                ).scalars()
+            )
             return [
                 NavPoint(
                     date=row.nav_date,
@@ -319,8 +354,12 @@ class PostgresFundRepository(FundRepository):
                     ),
                     status=self._status(row.quality_status),
                 )
-                for row in rows
+                for row in reversed(rows)
             ]
+
+    def is_ready(self) -> bool:
+        with self._session_factory() as session:
+            return session.scalar(select(1)) == 1
 
     @staticmethod
     def _index_summary(family: IndexFamily, count: int) -> IndexSummary:
@@ -437,36 +476,56 @@ class PostgresFundRepository(FundRepository):
         if not share_ids:
             return {}, {}
 
-        fees_by_share: dict[int, dict[str, float]] = {}
-        for share_id, fee_type, rate in session.execute(
-            select(FeeHistory.fund_share_class_id, FeeHistory.fee_type, FeeHistory.rate)
+        fee_rank = func.row_number().over(
+            partition_by=(FeeHistory.fund_share_class_id, FeeHistory.fee_type),
+            order_by=(
+                FeeHistory.effective_from.desc().nullslast(),
+                FeeHistory.id.desc(),
+            ),
+        ).label("rank")
+        latest_fees = (
+            select(
+                FeeHistory.fund_share_class_id.label("share_id"),
+                FeeHistory.fee_type,
+                FeeHistory.rate,
+                fee_rank,
+            )
             .where(
                 FeeHistory.fund_share_class_id.in_(share_ids),
                 or_(FeeHistory.effective_from.is_(None), FeeHistory.effective_from <= func.now()),
                 or_(FeeHistory.effective_to.is_(None), FeeHistory.effective_to > func.now()),
             )
-            .order_by(
-                FeeHistory.fund_share_class_id,
-                FeeHistory.effective_from.desc().nullslast(),
-                FeeHistory.id.desc(),
-            )
+            .subquery()
+        )
+        fees_by_share: dict[int, dict[str, float]] = {}
+        for share_id, fee_type, rate in session.execute(
+            select(latest_fees.c.share_id, latest_fees.c.fee_type, latest_fees.c.rate)
+            .where(latest_fees.c.rank == 1)
         ).all():
-            fees_by_share.setdefault(share_id, {}).setdefault(fee_type, float(rate))
+            fees_by_share.setdefault(share_id, {})[fee_type] = float(rate)
 
+        metric_rank = func.row_number().over(
+            partition_by=(
+                CalculatedMetric.fund_share_class_id,
+                CalculatedMetric.metric_code,
+            ),
+            order_by=(CalculatedMetric.period_end.desc(), CalculatedMetric.id.desc()),
+        ).label("rank")
+        latest_metric_ids = (
+            select(CalculatedMetric.id.label("metric_id"), metric_rank)
+            .where(CalculatedMetric.fund_share_class_id.in_(share_ids))
+            .subquery()
+        )
         metrics_by_share: dict[int, dict[str, CalculatedMetric]] = {}
         metrics = session.execute(
             select(CalculatedMetric)
-            .where(CalculatedMetric.fund_share_class_id.in_(share_ids))
-            .order_by(
-                CalculatedMetric.fund_share_class_id,
-                CalculatedMetric.period_end.desc(),
-                CalculatedMetric.id.desc(),
-            )
+            .join(latest_metric_ids, latest_metric_ids.c.metric_id == CalculatedMetric.id)
+            .where(latest_metric_ids.c.rank == 1)
         ).scalars()
         for metric in metrics:
-            metrics_by_share.setdefault(metric.fund_share_class_id, {}).setdefault(
-                metric.metric_code, metric
-            )
+            metrics_by_share.setdefault(metric.fund_share_class_id, {})[
+                metric.metric_code
+            ] = metric
         return fees_by_share, metrics_by_share
 
     def _fund_row(

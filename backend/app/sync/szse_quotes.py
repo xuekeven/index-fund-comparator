@@ -1,4 +1,5 @@
 import argparse
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -14,6 +15,7 @@ from app.sync.szse_funds import SZSE_REPORT_URL, SZSE_SOURCE_URL, clean_report_v
 
 
 SZSE_QUOTE_CATALOG_ID = "1815_fund_child"
+logger = logging.getLogger(__name__)
 
 
 def fetch_quote_history(client: httpx.Client, ticker: str) -> list[dict[str, str]]:
@@ -85,8 +87,14 @@ def sync_quotes(
 
     histories: dict[str, list[dict[str, str]]] = {}
     resolved_date = trade_date
+    missing: list[str] = []
     for listing in listings:
-        history = fetch_quote_history(client, listing.ticker)
+        try:
+            history = fetch_quote_history(client, listing.ticker)
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            missing.append(listing.ticker)
+            logger.warning("SZSE quote sync skipped %s: %s", listing.ticker, exc)
+            continue
         histories[listing.ticker] = history
         if resolved_date is None and history:
             resolved_date = resolve_latest_trade_date(history, listing.ticker)
@@ -94,8 +102,9 @@ def sync_quotes(
         raise RuntimeError("No recent SZSE quote date could be resolved")
 
     synced = 0
-    missing: list[str] = []
     for listing in listings:
+        if listing.ticker not in histories:
+            continue
         row = next(
             (
                 item

@@ -3,88 +3,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getComparison, getFunds, getIndices } from "@/lib/api";
-import type { FundComparisonRow, IndexSummary, TradingVenue } from "@/lib/types";
+import {
+  keepAvailable,
+  readFilterPreferences,
+  writeFilterPreferences,
+} from "@/lib/filter-preferences";
+import {
+  EXCHANGES,
+  filterFundRows,
+  sortFundRows,
+  VENUES,
+} from "@/lib/fund-list";
+import type { FundSortKey, SortDirection, VenueFilter } from "@/lib/fund-list";
+import type { FundComparisonRow, IndexSummary } from "@/lib/types";
 import { CloseIcon, InfoIcon, MarkIcon, RefreshIcon, SearchIcon } from "./icons";
 import { ComparisonView } from "./comparison-view";
-import {
-  FundCards,
-  FundTable,
-  type FundSortKey,
-  type SortDirection,
-} from "./fund-table";
-
-type VenueFilter = "全部" | TradingVenue;
-type ExchangeFilter = "全部" | "深交所" | "上交所";
-
-const VENUES: VenueFilter[] = ["全部", "场内", "场外"];
-const EXCHANGES: Exclude<ExchangeFilter, "全部">[] = ["深交所", "上交所"];
-const FILTER_PREFERENCES_KEY = "index-fund-comparator:filters:v1";
+import { FundCards, FundTable } from "./fund-table";
 
 type CachedFunds = {
   items: FundComparisonRow[];
   lastSyncedAt: Date | null;
 };
-
-type FilterPreferences = {
-  activeIndex: string;
-  venue: VenueFilter;
-  exchanges: string[];
-  shareClasses: string[];
-  currencies: string[];
-};
-
-const DEFAULT_FILTER_PREFERENCES: FilterPreferences = {
-  activeIndex: "csi-500",
-  venue: "全部",
-  exchanges: [],
-  shareClasses: [],
-  currencies: [],
-};
-
-function stringArray(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-function readFilterPreferences(): FilterPreferences {
-  if (typeof window === "undefined") return DEFAULT_FILTER_PREFERENCES;
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(FILTER_PREFERENCES_KEY) ?? "null");
-    if (!parsed || typeof parsed !== "object") return DEFAULT_FILTER_PREFERENCES;
-    const value = parsed as Partial<FilterPreferences>;
-    const venue = VENUES.includes(value.venue as VenueFilter)
-      ? value.venue as VenueFilter
-      : "全部";
-    return {
-      activeIndex: typeof value.activeIndex === "string" && value.activeIndex
-        ? value.activeIndex
-        : DEFAULT_FILTER_PREFERENCES.activeIndex,
-      venue,
-      exchanges: venue === "场内"
-        ? stringArray(value.exchanges).filter((item) => EXCHANGES.some((value) => value === item))
-        : [],
-      shareClasses: venue === "场外" ? stringArray(value.shareClasses) : [],
-      currencies: venue === "场外" ? stringArray(value.currencies) : [],
-    };
-  } catch {
-    return DEFAULT_FILTER_PREFERENCES;
-  }
-}
-
-function writeFilterPreferences(preferences: FilterPreferences) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(FILTER_PREFERENCES_KEY, JSON.stringify(preferences));
-  } catch {
-    // Storage can be unavailable in private mode or blocked by browser policy.
-  }
-}
-
-function keepAvailable(current: string[], available: string[]) {
-  const next = current.filter((item) => available.includes(item));
-  return next.length === current.length ? current : next;
-}
 
 function formatSyncTime(value: Date | null) {
   if (!value) return "尚未同步";
@@ -100,22 +39,6 @@ function formatSyncTime(value: Date | null) {
 function formatTradeDate(value: string | null) {
   if (!value) return "暂无交易日";
   return value.slice(5).replace("-", "/");
-}
-
-const RETURN_PERIOD_BY_SORT_KEY: Partial<Record<FundSortKey, string>> = {
-  return1m: "1月",
-  return3m: "3月",
-  return6m: "6月",
-  returnYtd: "今年来",
-  return1y: "1年",
-};
-
-function fundSortValue(fund: FundComparisonRow, key: FundSortKey): number | null {
-  if (key === "expenseRate") return fund.expenseRate;
-  if (key === "scale") return fund.scaleBillionCny;
-  const period = RETURN_PERIOD_BY_SORT_KEY[key];
-  if (!period) return null;
-  return fund.returns.find((item) => item.period === period)?.value ?? null;
 }
 
 function comparisonScopeText(index: IndexSummary) {
@@ -216,6 +139,8 @@ export function ComparisonDashboard() {
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   const fundCache = useRef(new Map<string, CachedFunds>());
+  const fundController = useRef<AbortController | null>(null);
+  const fundRequestId = useRef(0);
   const comparisonController = useRef<AbortController | null>(null);
 
   const loadIndices = useCallback(async (signal?: AbortSignal) => {
@@ -228,33 +153,44 @@ export function ComparisonDashboard() {
     }
   }, []);
 
-  const loadFunds = useCallback(async (signal?: AbortSignal, force = false) => {
-    const cached = fundCache.current.get(activeIndex);
+  const loadFunds = useCallback(async (
+    indexId: string,
+    signal?: AbortSignal,
+    force = false,
+  ) => {
+    const requestId = ++fundRequestId.current;
+    const cached = fundCache.current.get(indexId);
     if (cached && !force) {
-      setFunds(cached.items);
-      setLastSyncedAt(cached.lastSyncedAt);
-      setError(null);
-      setLoading(false);
+      if (fundRequestId.current === requestId) {
+        setFunds(cached.items);
+        setLastSyncedAt(cached.lastSyncedAt);
+        setError(null);
+        setLoading(false);
+      }
       return;
     }
 
     setError(null);
     try {
-      const response = await getFunds(activeIndex, undefined, signal);
+      const response = await getFunds(indexId, undefined, signal);
       const syncedAt = response.lastSyncedAt ? new Date(response.lastSyncedAt) : null;
-      fundCache.current.set(activeIndex, {
+      fundCache.current.set(indexId, {
         items: response.items,
         lastSyncedAt: syncedAt,
       });
-      setFunds(response.items);
-      setLastSyncedAt(syncedAt);
+      if (fundRequestId.current === requestId) {
+        setFunds(response.items);
+        setLastSyncedAt(syncedAt);
+      }
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === "AbortError") return;
-      setError("暂时无法连接数据服务，请稍后重试。");
+      if (fundRequestId.current === requestId) {
+        setError("暂时无法连接数据服务，请稍后重试。");
+      }
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (!signal?.aborted && fundRequestId.current === requestId) setLoading(false);
     }
-  }, [activeIndex]);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -275,9 +211,14 @@ export function ComparisonDashboard() {
 
   useEffect(() => {
     const controller = new AbortController();
-    queueMicrotask(() => loadFunds(controller.signal));
-    return () => controller.abort();
-  }, [loadFunds]);
+    fundController.current?.abort();
+    fundController.current = controller;
+    queueMicrotask(() => loadFunds(activeIndex, controller.signal));
+    return () => {
+      controller.abort();
+      if (fundController.current === controller) fundController.current = null;
+    };
+  }, [activeIndex, loadFunds]);
   useEffect(() => {
     writeFilterPreferences({
       activeIndex,
@@ -289,7 +230,10 @@ export function ComparisonDashboard() {
   }, [activeIndex, currencies, exchanges, shareClasses, venue]);
 
 
-  useEffect(() => () => comparisonController.current?.abort(), []);
+  useEffect(() => () => {
+    fundController.current?.abort();
+    comparisonController.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (!openFilter) return;
@@ -332,26 +276,10 @@ export function ComparisonDashboard() {
     });
   }, [currencyOptions, funds.length, shareClassOptions, venue]);
 
-  const visibleFunds = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    return funds.filter((fund) => {
-      if (venue !== "全部" && fund.tradingVenue !== venue) return false;
-      if (exchanges.length > 0 && (!fund.exchange || !exchanges.includes(fund.exchange))) {
-        return false;
-      }
-      if (
-        shareClasses.length > 0
-        && (!fund.shareClass || !shareClasses.includes(fund.shareClass))
-      ) {
-        return false;
-      }
-      if (currencies.length > 0 && !currencies.includes(fund.currency)) return false;
-      if (!normalized) return true;
-      return [fund.code, fund.displayName, fund.fundCompany].some((value) =>
-        value.toLocaleLowerCase().includes(normalized),
-      );
-    });
-  }, [currencies, exchanges, funds, query, shareClasses, venue]);
+  const visibleFunds = useMemo(
+    () => filterFundRows(funds, { venue, exchanges, shareClasses, currencies, query }),
+    [currencies, exchanges, funds, query, shareClasses, venue],
+  );
 
   const tradeDate = useMemo(() => {
     const dates = visibleFunds.flatMap((fund) =>
@@ -362,36 +290,10 @@ export function ComparisonDashboard() {
     return dates.length > 0 ? dates.sort().at(-1) ?? null : null;
   }, [visibleFunds]);
 
-  const sortedFunds = useMemo(() => {
-    if (!sortKey) return visibleFunds;
-
-    return visibleFunds
-      .map((fund, originalIndex) => ({ fund, originalIndex }))
-      .sort((leftItem, rightItem) => {
-        const { fund: left } = leftItem;
-        const { fund: right } = rightItem;
-
-        if (sortKey === "code") {
-          const comparison = left.code.localeCompare(right.code, "zh-CN", { numeric: true });
-          return comparison === 0
-            ? leftItem.originalIndex - rightItem.originalIndex
-            : sortDirection === "asc" ? comparison : -comparison;
-        }
-
-        const leftValue = fundSortValue(left, sortKey);
-        const rightValue = fundSortValue(right, sortKey);
-        if (leftValue === null && rightValue === null) {
-          return leftItem.originalIndex - rightItem.originalIndex;
-        }
-        if (leftValue === null) return 1;
-        if (rightValue === null) return -1;
-        if (leftValue === rightValue) {
-          return left.code.localeCompare(right.code, "zh-CN", { numeric: true });
-        }
-        return sortDirection === "asc" ? leftValue - rightValue : rightValue - leftValue;
-      })
-      .map(({ fund }) => fund);
-  }, [sortDirection, sortKey, visibleFunds]);
+  const sortedFunds = useMemo(
+    () => sortFundRows(visibleFunds, sortKey, sortDirection),
+    [sortDirection, sortKey, visibleFunds],
+  );
 
   const selectedFunds = useMemo(
     () => funds.filter((fund) => selected.includes(fund.code)),
@@ -426,7 +328,7 @@ export function ComparisonDashboard() {
     }
   }
 
-  function sortFunds(key: FundSortKey) {
+  function changeSort(key: FundSortKey) {
     if (sortKey === key) {
       setSortDirection((current) => current === "asc" ? "desc" : "asc");
       return;
@@ -461,10 +363,19 @@ export function ComparisonDashboard() {
   async function refresh() {
     setLoading(true);
     fundCache.current.delete(activeIndex);
+    fundController.current?.abort();
+    const controller = new AbortController();
+    fundController.current = controller;
     try {
-      await Promise.all([loadIndices(), loadFunds(undefined, true)]);
-    } catch {
+      await Promise.all([
+        loadIndices(controller.signal),
+        loadFunds(activeIndex, controller.signal, true),
+      ]);
+    } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === "AbortError") return;
       setError("刷新失败，请检查后端服务。");
+    } finally {
+      if (fundController.current === controller) fundController.current = null;
     }
   }
 
@@ -476,6 +387,8 @@ export function ComparisonDashboard() {
     setComparisonOpen(true);
     setComparisonLoading(true);
     setComparisonError(null);
+    setComparisonFunds([]);
+    setComparisonWarnings([]);
     try {
       const response = await getComparison(selected, controller.signal);
       setComparisonFunds(response.items);
@@ -488,11 +401,11 @@ export function ComparisonDashboard() {
     }
   }
 
-  function closeComparison() {
+  const closeComparison = useCallback(() => {
     comparisonController.current?.abort();
     comparisonController.current = null;
     setComparisonOpen(false);
-  }
+  }, []);
 
   return (
     <div className="app-shell">
@@ -654,7 +567,7 @@ export function ComparisonDashboard() {
                 onToggle={toggleFund}
                 sortKey={sortKey}
                 sortDirection={sortDirection}
-                onSort={sortFunds}
+                onSort={changeSort}
               />
               <FundCards funds={sortedFunds} selected={selected} onToggle={toggleFund} />
             </>

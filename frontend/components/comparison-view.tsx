@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 
 import { getFundDetailUrl } from "@/lib/fund-links";
@@ -48,23 +48,60 @@ export function ComparisonView({
   onClose,
   onRetry,
 }: ComparisonViewProps) {
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
   useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButtonRef.current?.focus();
+
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = Array.from(
+        sheetRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
   }, [onClose]);
 
   return (
     <div className="comparison-overlay" role="dialog" aria-modal="true" aria-labelledby="comparison-title">
-      <div className="comparison-sheet">
+      <div className="comparison-sheet" ref={sheetRef}>
         <header className="comparison-header">
           <div>
             <span className="section-kicker">并排对照</span>
             <h2 id="comparison-title">基金比较</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭比较">
+          <button ref={closeButtonRef} className="icon-button" type="button" onClick={onClose} aria-label="关闭比较">
             <CloseIcon />
           </button>
         </header>

@@ -30,6 +30,12 @@ def test_health() -> None:
     assert response.json()["dataMode"] == "sample"
 
 
+def test_readiness() -> None:
+    response = client.get("/api/v1/health/ready")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
 def test_api_documentation_is_disabled() -> None:
     assert client.get("/docs").status_code == 404
     assert client.get("/redoc").status_code == 404
@@ -46,6 +52,7 @@ def test_frontend_serves_spa_fallback() -> None:
     response = client.get("/some/client/route")
     assert response.status_code == 200
     assert "<div id=\"root\"></div>" in response.text
+    assert response.headers["cache-control"] == "no-cache"
 
 
 def test_frontend_serves_built_asset() -> None:
@@ -54,6 +61,7 @@ def test_frontend_serves_built_asset() -> None:
     response = client.get(asset_path.removeprefix("/indexfund"))
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
 
 
 def test_unknown_api_route_remains_404() -> None:
@@ -113,6 +121,33 @@ def test_compare_requires_distinct_fund_codes() -> None:
     response = client.get(
         "/api/v1/comparisons",
         params=[("fundCodes", "510500"), ("fundCodes", "510500")],
+    )
+    assert response.status_code == 422
+
+
+def test_compare_requires_two_matching_funds() -> None:
+    response = client.get(
+        "/api/v1/comparisons",
+        params=[("fundCodes", "510500"), ("fundCodes", "not-found")],
+    )
+    assert response.status_code == 404
+
+
+def test_nav_supports_date_range_and_limit() -> None:
+    response = client.get(
+        "/api/v1/funds/510500/nav",
+        params={"startDate": "2026-08-01", "endDate": "2026-08-31", "limit": 3},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 3
+    assert items == sorted(items, key=lambda item: item["date"])
+
+
+def test_nav_rejects_reversed_date_range() -> None:
+    response = client.get(
+        "/api/v1/funds/510500/nav",
+        params={"startDate": "2026-08-31", "endDate": "2026-08-01"},
     )
     assert response.status_code == 422
 
