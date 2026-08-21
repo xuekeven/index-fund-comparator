@@ -539,11 +539,13 @@ export function ComparisonDashboard() {
               </p>
               <p className="fund-last-synced">
                 <span className="status-dot" />
-                同步时间 {formatSyncTime(lastSyncedAt)}
+                <span>同步时间</span>
+                <strong>{formatSyncTime(lastSyncedAt)}</strong>
               </p>
               <p className="fund-trade-date">
                 <span className="status-dot" />
-                交易日 {formatTradeDate(tradeDate)}
+                <span>交易日</span>
+                <strong>{formatTradeDate(tradeDate)}</strong>
               </p>
             </div>
           )}
