@@ -127,13 +127,13 @@ uv run python -m app.sync.sse_details --dry-run
 uv run python -m app.sync.sse_details
 uv run python -m app.sync.szse_funds --dry-run
 uv run python -m app.sync.szse_funds
-uv run python -m app.sync.szse_quotes --dry-run
-uv run python -m app.sync.szse_quotes
+uv run python -m app.sync.szse_details --dry-run
+uv run python -m app.sync.szse_details
 uv run python -m app.sync.csrc_funds --dry-run
 uv run python -m app.sync.csrc_funds
 ```
 
-同步命令可重复执行，但仍应避免本地和服务器同时运行。上交所脚本 A 每周更新基金列表和目标基金主数据；脚本 B 在交易日收盘后逐只读取目标基金详情页，统一更新收盘价、历史净值、管理费、托管费、基金规模、交易日和五个区间收益率。当前已适配上交所、深交所 ETF 清单及行情，以及证监会基金电子披露平台中的场外份额与净值。证监会同步器会排除 ETF、LOF、指数增强和等权/质量/低波等非目标指数变体，并按官方产品 ID 合并 A/C/E 等份额。深交所清单中的当前规模单位是万份，因此不会误写成人民币基金规模。运作费率采用管理费与托管费之和，销售服务费单列；仅当收盘价与单位净值日期一致时计算同日估算偏离。
+同步命令可重复执行，但仍应避免本地和服务器同时运行。上交所脚本 A 与深交所脚本 C 每周更新基金列表和目标基金主数据；深交所脚本 C 同时从证监会最新基金产品资料概要提取管理费与托管费。上交所脚本 B 在交易日收盘后更新收盘价、净值、费率、规模、交易日和五个区间收益率；深交所脚本 D 只更新每日收盘价、正式净值、估算规模、交易日和五个区间收益率，不重复下载费率 PDF。深交所基金规模按同日“万份”规模乘以同日单位净值估算，质量状态标记为 `estimated`，日期不一致时不写入。证监会场外同步器会排除 ETF、LOF、指数增强和等权/质量/低波等非目标指数变体，并按官方产品 ID 合并 A/C/E 等份额。运作费率采用管理费与托管费之和，销售服务费单列；仅当收盘价与单位净值日期一致时计算同日估算偏离。
 
 ## 验证
 
@@ -176,7 +176,7 @@ IFC_DATA_MODE=database
 IFC_CORS_ORIGINS=https://homeserver.tailed5977.ts.net
 ```
 
-安装数据同步定时任务。当前配置为脚本 A 每周一 `09:00`、脚本 B 周一至周五 `16:00`，时区为 `Asia/Shanghai`：
+安装数据同步定时任务。当前配置为脚本 A/C 每周一 `09:00`、脚本 B/D 周一至周五 `16:00`，时区为 `Asia/Shanghai`：
 
 ```bash
 ./deploy/manage-crontab.sh print
@@ -265,4 +265,4 @@ pm2 save
 
 FastAPI 只监听回环地址 `127.0.0.1:6006`，对外仅开放 Nginx HTTPS 的 `/indexfund/`。开发端口 `7006` 不用于生产。PostgreSQL 的 `5432` 仅对服务器自身和明确授权的 Tailscale/局域网设备开放，绝不能直接暴露到公网。
 
-下一步补齐深交所及场外基金费率、人民币资产规模和区间收益率。上交所场内基金已经使用详情页历史净值计算五个区间收益率。
+下一步补齐场外基金费率、人民币资产规模和区间收益率。沪深场内基金已经分别通过脚本 B/D 计算五个区间收益率；深交所新部署实例需要等待正式净值逐日积累后才会逐步出现长周期收益率。

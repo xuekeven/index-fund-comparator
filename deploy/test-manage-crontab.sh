@@ -14,6 +14,8 @@ printf '%s\n' \
   '15 2 * * * /usr/local/bin/unrelated-backup' \
   '0 9 * * 1 cd /old/backend && .venv/bin/python -m app.sync.sse_funds' \
   '0 20 * * 1-5 cd /old/backend && .venv/bin/python -m app.sync.sse_details' \
+  '0 8 * * 1 cd /old/backend && .venv/bin/python -m app.sync.szse_funds' \
+  '0 15 * * 1-5 cd /old/backend && .venv/bin/python -m app.sync.szse_quotes' \
   > "${FAKE_CRONTAB_STATE}"
 
 printf '%s\n' \
@@ -39,12 +41,20 @@ run_manager install
 
 [[ "$(grep -c 'app\.sync\.sse_funds' "${FAKE_CRONTAB_STATE}")" == "1" ]]
 [[ "$(grep -c 'app\.sync\.sse_details' "${FAKE_CRONTAB_STATE}")" == "1" ]]
+[[ "$(grep -c 'app\.sync\.szse_funds' "${FAKE_CRONTAB_STATE}")" == "1" ]]
+[[ "$(grep -c 'app\.sync\.szse_details' "${FAKE_CRONTAB_STATE}")" == "1" ]]
+if grep -q 'app\.sync\.szse_quotes' "${FAKE_CRONTAB_STATE}"; then
+  echo "Legacy SZSE quote job was not removed" >&2
+  exit 1
+fi
 grep -q '^0 16 \* \* 1-5 .*app\.sync\.sse_details' "${FAKE_CRONTAB_STATE}"
+grep -q '^0 9 \* \* 1 .*app\.sync\.szse_funds' "${FAKE_CRONTAB_STATE}"
+grep -q '^0 16 \* \* 1-5 .*app\.sync\.szse_details' "${FAKE_CRONTAB_STATE}"
 grep -q '/usr/local/bin/unrelated-backup' "${FAKE_CRONTAB_STATE}"
 
 run_manager remove
 
-if grep -q 'app\.sync\.sse_' "${FAKE_CRONTAB_STATE}"; then
+if grep -Eq 'app\.sync\.(sse|szse)_' "${FAKE_CRONTAB_STATE}"; then
   echo "Managed jobs were not removed" >&2
   exit 1
 fi

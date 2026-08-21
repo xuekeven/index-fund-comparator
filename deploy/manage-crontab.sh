@@ -19,6 +19,8 @@ fi
 source "${schedule_file}"
 : "${SSE_FUNDS_SCHEDULE:?SSE_FUNDS_SCHEDULE is required}"
 : "${SSE_DETAILS_SCHEDULE:?SSE_DETAILS_SCHEDULE is required}"
+: "${SZSE_FUNDS_SCHEDULE:?SZSE_FUNDS_SCHEDULE is required}"
+: "${SZSE_DETAILS_SCHEDULE:?SZSE_DETAILS_SCHEDULE is required}"
 
 account_directory=""
 if command -v getent >/dev/null 2>&1; then
@@ -39,14 +41,20 @@ printf -v quoted_backend '%q' "${backend_directory}"
 printf -v quoted_python '%q' "${python_binary}"
 printf -v quoted_log '%q' "${sync_log}"
 
-funds_runner="${quoted_python}"
-details_runner="${quoted_python}"
+sse_funds_runner="${quoted_python}"
+sse_details_runner="${quoted_python}"
+szse_funds_runner="${quoted_python}"
+szse_details_runner="${quoted_python}"
 if flock_binary="$(command -v flock 2>/dev/null)" && [[ -n "${flock_binary}" ]]; then
   printf -v quoted_flock '%q' "${flock_binary}"
-  printf -v quoted_funds_lock '%q' "${log_directory}/index-fund-sse-funds.lock"
-  printf -v quoted_details_lock '%q' "${log_directory}/index-fund-sse-details.lock"
-  funds_runner="${quoted_flock} -n ${quoted_funds_lock} ${quoted_python}"
-  details_runner="${quoted_flock} -n ${quoted_details_lock} ${quoted_python}"
+  printf -v quoted_sse_funds_lock '%q' "${log_directory}/index-fund-sse-funds.lock"
+  printf -v quoted_sse_details_lock '%q' "${log_directory}/index-fund-sse-details.lock"
+  printf -v quoted_szse_funds_lock '%q' "${log_directory}/index-fund-szse-funds.lock"
+  printf -v quoted_szse_details_lock '%q' "${log_directory}/index-fund-szse-details.lock"
+  sse_funds_runner="${quoted_flock} -n ${quoted_sse_funds_lock} ${quoted_python}"
+  sse_details_runner="${quoted_flock} -n ${quoted_sse_details_lock} ${quoted_python}"
+  szse_funds_runner="${quoted_flock} -n ${quoted_szse_funds_lock} ${quoted_python}"
+  szse_details_runner="${quoted_flock} -n ${quoted_szse_details_lock} ${quoted_python}"
 fi
 
 current_crontab="$(mktemp)"
@@ -66,6 +74,9 @@ awk \
     in_managed_block { next }
     /app\.sync\.sse_funds/ { next }
     /app\.sync\.sse_details/ { next }
+    /app\.sync\.szse_funds/ { next }
+    /app\.sync\.szse_quotes/ { next }
+    /app\.sync\.szse_details/ { next }
     { print }
     END { if (in_managed_block) exit 42 }
   ' "${current_crontab}" > "${cleaned_crontab}"
@@ -79,9 +90,13 @@ fi
   printf '%s\n' "SHELL=/bin/bash"
   printf '%s\n' "CRON_TZ=Asia/Shanghai"
   printf '%s cd %s && %s -m app.sync.sse_funds >> %s 2>&1\n' \
-    "${SSE_FUNDS_SCHEDULE}" "${quoted_backend}" "${funds_runner}" "${quoted_log}"
+    "${SSE_FUNDS_SCHEDULE}" "${quoted_backend}" "${sse_funds_runner}" "${quoted_log}"
   printf '%s cd %s && %s -m app.sync.sse_details >> %s 2>&1\n' \
-    "${SSE_DETAILS_SCHEDULE}" "${quoted_backend}" "${details_runner}" "${quoted_log}"
+    "${SSE_DETAILS_SCHEDULE}" "${quoted_backend}" "${sse_details_runner}" "${quoted_log}"
+  printf '%s cd %s && %s -m app.sync.szse_funds >> %s 2>&1\n' \
+    "${SZSE_FUNDS_SCHEDULE}" "${quoted_backend}" "${szse_funds_runner}" "${quoted_log}"
+  printf '%s cd %s && %s -m app.sync.szse_details >> %s 2>&1\n' \
+    "${SZSE_DETAILS_SCHEDULE}" "${quoted_backend}" "${szse_details_runner}" "${quoted_log}"
   printf '%s\n' "${managed_block_end}"
 } >> "${generated_crontab}"
 
