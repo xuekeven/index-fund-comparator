@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { filterFundRows, sortFundRows } from "./fund-list.ts";
+import { filterFundRows, sortFundRows, VENUES } from "./fund-list.ts";
 import type { FundComparisonRow } from "./types.ts";
 
 function fund(overrides: Partial<FundComparisonRow>): FundComparisonRow {
@@ -82,4 +82,8 @@ test("sorts numeric values while keeping missing values last", () => {
     sortFundRows(rows, "expenseRate", "desc").map((item) => item.code),
     ["2", "1", "3"],
   );
+});
+
+test("offers only explicit trading venue filters", () => {
+  assert.deepEqual(VENUES, ["场内", "场外"]);
 });

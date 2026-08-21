@@ -10,9 +10,9 @@ export type FundSortKey =
   | "returnYtd"
   | "return1y";
 export type SortDirection = "asc" | "desc";
-export type VenueFilter = "全部" | TradingVenue;
+export type VenueFilter = TradingVenue;
 
-export const VENUES: VenueFilter[] = ["全部", "场内", "场外"];
+export const VENUES: VenueFilter[] = ["场内", "场外"];
 export const EXCHANGES = ["深交所", "上交所"];
 
 export interface FundFilters {
@@ -42,7 +42,7 @@ function fundSortValue(fund: FundComparisonRow, key: FundSortKey): number | null
 export function filterFundRows(funds: FundComparisonRow[], filters: FundFilters) {
   const normalized = filters.query.trim().toLocaleLowerCase();
   return funds.filter((fund) => {
-    if (filters.venue !== "全部" && fund.tradingVenue !== filters.venue) return false;
+    if (fund.tradingVenue !== filters.venue) return false;
     if (
       filters.exchanges.length > 0
       && (!fund.exchange || !filters.exchanges.includes(fund.exchange))

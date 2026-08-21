@@ -54,6 +54,7 @@ interface MultiSelectFilterProps {
   options: string[];
   selected: string[];
   open: boolean;
+  allowClear?: boolean;
   onOpenChange: (open: boolean) => void;
   onToggle: (value: string) => void;
   onClear: () => void;
@@ -65,12 +66,13 @@ function MultiSelectFilter({
   options,
   selected,
   open,
+  allowClear = true,
   onOpenChange,
   onToggle,
   onClear,
 }: MultiSelectFilterProps) {
   const selectionLabel = selected.length === 0
-    ? "全部"
+    ? allowClear ? "全部" : "未筛选"
     : selected.length === 1
       ? selected[0]
       : `已选 ${selected.length} 项`;
@@ -89,16 +91,18 @@ function MultiSelectFilter({
       </button>
       {open && (
         <div className="multi-filter-menu" id={`${filterId}-menu`}>
-          <button
-            type="button"
-            className={selected.length === 0 ? "active" : ""}
-            onClick={() => {
-              onClear();
-              onOpenChange(false);
-            }}
-          >
-            全部
-          </button>
+          {allowClear && (
+            <button
+              type="button"
+              className={selected.length === 0 ? "active" : ""}
+              onClick={() => {
+                onClear();
+                onOpenChange(false);
+              }}
+            >
+              全部
+            </button>
+          )}
           {options.map((option) => (
             <label key={option}>
               <input
@@ -309,8 +313,8 @@ export function ComparisonDashboard() {
       setLastSyncedAt(cached.lastSyncedAt);
     }
     setActiveIndex(indexId);
-    setVenue("全部");
-    setExchanges([]);
+    setVenue("场内");
+    setExchanges(["上交所"]);
     setShareClasses([]);
     setCurrencies([]);
     setOpenFilter(null);
@@ -321,7 +325,7 @@ export function ComparisonDashboard() {
   function changeVenue(nextVenue: VenueFilter) {
     setVenue(nextVenue);
     setOpenFilter(null);
-    if (nextVenue !== "场内") setExchanges([]);
+    setExchanges(nextVenue === "场内" ? ["上交所"] : []);
     if (nextVenue !== "场外") {
       setShareClasses([]);
       setCurrencies([]);
@@ -481,6 +485,7 @@ export function ComparisonDashboard() {
                   options={EXCHANGES}
                   selected={exchanges}
                   open={openFilter === "exchange"}
+                  allowClear={false}
                   onOpenChange={(open) => setOpenFilter(open ? "exchange" : null)}
                   onToggle={toggleExchange}
                   onClear={() => setExchanges([])}
