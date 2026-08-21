@@ -95,11 +95,11 @@ def product_summary_url(detail_html: str) -> str | None:
 def parse_fee_rates(pdf_content: bytes) -> dict[str, Decimal]:
     reader = PdfReader(io.BytesIO(pdf_content))
     text = " ".join((page.extract_text() or "") for page in reader.pages)
-    normalized = re.sub(r"\s+", " ", text)
+    compact = re.sub(r"\s+", "", text)
     labels = {"management": "管理费", "custody": "托管费"}
     rates: dict[str, Decimal] = {}
     for fee_type, label in labels.items():
-        match = re.search(rf"{label}(?:率)?\s*([0-9]+(?:\.[0-9]+)?)\s*%", normalized)
+        match = re.search(rf"{label}.{{0,24}}?([0-9]+(?:\.[0-9]+)?)%", compact)
         if match:
             rates[fee_type] = Decimal(match.group(1))
     if set(rates) != set(labels):

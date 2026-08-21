@@ -69,7 +69,10 @@ def test_product_summary_url_prefers_product_summary() -> None:
 def test_parse_fee_rates_reads_management_and_custody(monkeypatch) -> None:
     class Page:
         def extract_text(self) -> str:
-            return "基金运作相关费用 管理费 0.15% 基金管理人 托管费 0.05% 基金托管人"
+            return (
+                "基金运作相关费用 管 理 费 固定比例 0.15 % 基金管理人 "
+                "托 管 费 年费率：0.05 % 基金托管人"
+            )
 
     class Reader:
         def __init__(self, _content) -> None:
