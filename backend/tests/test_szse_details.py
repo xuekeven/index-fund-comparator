@@ -1,4 +1,5 @@
 from datetime import date
+import json
 from decimal import Decimal
 
 import app.sync.szse_details as szse_details
@@ -31,6 +32,52 @@ def test_parse_nav_report_reads_official_nav_rows() -> None:
     ]
 
 
+def test_eid_nav_query_and_parser_use_exact_etf_code() -> None:
+    query = json.loads(
+        szse_details.eid_nav_query_data(
+            "159513", date(2025, 8, 21), date(2026, 8, 21)
+        )
+    )
+    assert {item["name"]: item["value"] for item in query}["fundCode"] == "159513"
+
+    records = szse_details.parse_eid_nav_report(
+        {
+            "aaData": [
+                {
+                    "code": "159513",
+                    "valuationDate": "2026-08-20",
+                    "shareNetValue": "1.6496",
+                },
+                {
+                    "code": "159999",
+                    "valuationDate": "2026-08-20",
+                    "shareNetValue": "1.0000",
+                },
+            ]
+        },
+        "159513",
+    )
+    assert [(record.nav_date, record.unit_nav) for record in records] == [
+        (date(2026, 8, 20), Decimal("1.6496"))
+    ]
+
+
+def test_merge_nav_and_scale_use_latest_official_nav_on_or_before_date() -> None:
+    eid = [
+        szse_details.SseNavRecord("159513", date(2026, 8, 19), Decimal("1.66")),
+        szse_details.SseNavRecord("159513", date(2026, 8, 20), Decimal("1.67")),
+    ]
+    szse = [
+        szse_details.SseNavRecord("159513", date(2026, 8, 19), Decimal("1.6625"))
+    ]
+    records = szse_details.merge_nav_records(eid, szse)
+
+    assert records[0].unit_nav == Decimal("1.6625")
+    assert szse_details.latest_nav_on_or_before(
+        records, date(2026, 8, 21)
+    ) == Decimal("1.67")
+
+
 def test_estimated_scale_uses_official_share_count_and_same_day_nav() -> None:
     assert szse_details.estimated_scale_cny(
         Decimal("273867.67"), Decimal("3.1922")
@@ -52,3 +99,8 @@ def test_select_quote_row_supports_latest_and_explicit_dates() -> None:
     assert latest["ss"] == "3.1"
     assert requested_date == date(2026, 8, 19)
     assert requested["ss"] == "3.0"
+
+    assert [item[0] for item in szse_details.select_quote_rows(history, None)] == [
+        date(2026, 8, 20),
+        date(2026, 8, 19),
+    ]

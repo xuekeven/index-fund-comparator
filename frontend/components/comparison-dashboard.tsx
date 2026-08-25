@@ -16,7 +16,7 @@ import {
 } from "@/lib/fund-list";
 import type { FundSortKey, SortDirection, VenueFilter } from "@/lib/fund-list";
 import type { FundComparisonRow, IndexSummary } from "@/lib/types";
-import { CloseIcon, InfoIcon, MarkIcon, RefreshIcon, SearchIcon } from "./icons";
+import { CloseIcon, MarkIcon, RefreshIcon, SearchIcon } from "./icons";
 import { ComparisonView } from "./comparison-view";
 import { FundCards, FundTable } from "./fund-table";
 
@@ -39,13 +39,6 @@ function formatSyncTime(value: Date | null) {
 function formatTradeDate(value: string | null) {
   if (!value) return "暂无交易日";
   return value.slice(5).replace("-", "/");
-}
-
-function comparisonScopeText(index: IndexSummary) {
-  if (index.region === "中国内地") {
-    return `当前展示跟踪${index.shortName}的基金；价格、全收益等具体口径以基金合同为准。`;
-  }
-  return `当前展示跟踪${index.shortName}的基金；收益指数及人民币折算口径以基金合同为准。`;
 }
 
 interface MultiSelectFilterProps {
@@ -260,7 +253,7 @@ export function ComparisonDashboard() {
     };
   }, [openFilter]);
 
-  const currentIndex = indices.find((item) => item.id === activeIndex);
+
   const shareClassOptions = useMemo(
     () => Array.from(
       new Set(funds.flatMap((fund) => fund.shareClass ? [fund.shareClass] : [])),
@@ -314,7 +307,7 @@ export function ComparisonDashboard() {
     }
     setActiveIndex(indexId);
     setVenue("场内");
-    setExchanges(["上交所"]);
+    setExchanges([...EXCHANGES]);
     setShareClasses([]);
     setCurrencies([]);
     setOpenFilter(null);
@@ -325,7 +318,7 @@ export function ComparisonDashboard() {
   function changeVenue(nextVenue: VenueFilter) {
     setVenue(nextVenue);
     setOpenFilter(null);
-    setExchanges(nextVenue === "场内" ? ["上交所"] : []);
+    setExchanges(nextVenue === "场内" ? [...EXCHANGES] : []);
     if (nextVenue !== "场外") {
       setShareClasses([]);
       setCurrencies([]);
@@ -453,17 +446,6 @@ export function ComparisonDashboard() {
             ))}
           </div>
 
-          {currentIndex && (
-            <div className="benchmark-note">
-              <InfoIcon />
-              <div>
-                <strong>比较范围</strong>
-                <span>{comparisonScopeText(currentIndex)}</span>
-              </div>
-              {currentIndex.id !== "csi-500" && <b>精确基准待授权核验</b>}
-            </div>
-          )}
-
           <div className="toolbar">
             <div className="toolbar-filters">
               <div className="segment" aria-label="交易方式筛选">
@@ -581,7 +563,7 @@ export function ComparisonDashboard() {
           )}
 
           <p className="table-footnote">
-            仅当收盘价和净值日期一致时，展示“收盘价 ÷ 单位净值 − 1”的同日偏离。
+            “偏离”使用最新净值日对应的同日收盘价，按“收盘价 ÷ 单位净值 − 1”计算。
           </p>
         </section>
       </main>

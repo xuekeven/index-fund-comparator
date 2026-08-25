@@ -387,6 +387,7 @@ class PostgresFundRepository(FundRepository):
     def _fund_statement(self) -> Select[Any]:
         latest_nav = aliased(NavDaily)
         latest_quote = aliased(MarketQuote)
+        same_day_quote = aliased(MarketQuote)
         latest_scale = aliased(FundScale)
         source = aliased(SourceDocument)
 
@@ -399,6 +400,16 @@ class PostgresFundRepository(FundRepository):
             .order_by(MarketQuote.trade_date.desc(), MarketQuote.id.desc())
             .limit(1)
             .correlate(FundListing)
+        )
+        same_day_quote_id = (
+            select(MarketQuote.id)
+            .where(
+                MarketQuote.fund_listing_id == FundListing.id,
+                MarketQuote.trade_date == latest_nav.nav_date,
+            )
+            .order_by(MarketQuote.id.desc())
+            .limit(1)
+            .correlate(FundListing, latest_nav)
         )
         latest_scale_id = (
             select(FundScale.id)
@@ -443,6 +454,7 @@ class PostgresFundRepository(FundRepository):
                 latest_nav.nav_date,
                 latest_quote.close_price,
                 latest_quote.trade_date.label("close_date"),
+                same_day_quote.close_price.label("deviation_close_price"),
                 latest_scale.amount_cny.label("scale_cny"),
                 latest_scale.report_date.label("scale_date"),
                 source.source_name,
@@ -458,6 +470,10 @@ class PostgresFundRepository(FundRepository):
             .outerjoin(FundListing, FundListing.fund_share_class_id == FundShareClass.id)
             .outerjoin(latest_nav, latest_nav.id == latest_nav_id.scalar_subquery())
             .outerjoin(latest_quote, latest_quote.id == latest_quote_id.scalar_subquery())
+            .outerjoin(
+                same_day_quote,
+                same_day_quote.id == same_day_quote_id.scalar_subquery(),
+            )
             .outerjoin(latest_scale, latest_scale.id == latest_scale_id.scalar_subquery())
             .outerjoin(
                 source,
@@ -541,9 +557,14 @@ class PostgresFundRepository(FundRepository):
         expense_rate = calculate_operating_rate(management, custody)
         nav = float(row["nav"]) if row["nav"] is not None else None
         close = float(row["close_price"]) if row["close_price"] is not None else None
+        deviation_close = (
+            float(row["deviation_close_price"])
+            if row["deviation_close_price"] is not None
+            else None
+        )
         estimated_deviation = calculate_estimated_deviation(
-            close,
-            row["close_date"],
+            deviation_close,
+            row["nav_date"],
             nav,
             row["nav_date"],
         )

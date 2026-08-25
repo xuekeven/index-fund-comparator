@@ -1,7 +1,8 @@
 import argparse
+import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -22,6 +23,7 @@ from app.database_models import (
     MarketQuote,
     NavDaily,
 )
+from app.sync.csrc_funds import EID_NAV_URL
 from app.sync.sse_details import calculate_return_metrics
 from app.sync.sse_funds import ASIA_SHANGHAI, SseNavRecord
 from app.sync.szse_funds import (
@@ -36,6 +38,8 @@ from app.sync.szse_quotes import fetch_quote_history, quote_values
 SZSE_NAV_CATALOG_ID = "1785_child"
 SZSE_NAV_SOURCE_URL = "https://www.szse.cn/market/fund/list/stockFundList/index.html"
 RETURN_CALCULATION_VERSION = "szse-official-nav-simple-return-v1"
+NAV_BACKFILL_DAYS = 400
+NAV_PAGE_SIZE = 500
 logger = logging.getLogger(__name__)
 
 
@@ -97,6 +101,74 @@ def fetch_nav_records(client: httpx.Client, ticker: str) -> tuple[list[SseNavRec
     )
     response.raise_for_status()
     return parse_nav_report(response.json(), ticker), str(response.request.url)
+
+
+def eid_nav_query_data(ticker: str, start_date: date, end_date: date) -> str:
+    data = [
+        {"name": "sEcho", "value": 1},
+        {"name": "iColumns", "value": 5},
+        {"name": "sColumns", "value": ""},
+        {"name": "iDisplayStart", "value": 0},
+        {"name": "iDisplayLength", "value": NAV_PAGE_SIZE},
+        {"name": "fundType", "value": "all"},
+        {"name": "fundCompanyShortName", "value": ""},
+        {"name": "fundCode", "value": ticker},
+        {"name": "fundName", "value": ""},
+        {"name": "startDate", "value": start_date.isoformat()},
+        {"name": "endDate", "value": end_date.isoformat()},
+    ]
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_eid_nav_report(payload: Any, ticker: str) -> list[SseNavRecord]:
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"EID NAV report returned an unexpected payload for {ticker}")
+    records: dict[date, SseNavRecord] = {}
+    for row in payload.get("aaData") or []:
+        if str(row.get("code") or "").strip() != ticker:
+            continue
+        try:
+            nav_date = date.fromisoformat(str(row.get("valuationDate") or "").strip())
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid EID NAV date for {ticker}") from exc
+        unit_nav = decimal_or_none(row.get("shareNetValue"))
+        if unit_nav is None or unit_nav <= 0:
+            raise RuntimeError(f"Invalid EID NAV value for {ticker} on {nav_date}")
+        records[nav_date] = SseNavRecord(ticker, nav_date, unit_nav)
+    if not records:
+        raise RuntimeError(f"EID NAV report did not contain valid rows for {ticker}")
+    return [records[item] for item in sorted(records)]
+
+
+def fetch_eid_nav_records(
+    client: httpx.Client, ticker: str, end_date: date
+) -> tuple[list[SseNavRecord], str]:
+    response = client.get(
+        EID_NAV_URL,
+        params={
+            "aoData": eid_nav_query_data(
+                ticker, end_date - timedelta(days=NAV_BACKFILL_DAYS), end_date
+            )
+        },
+    )
+    response.raise_for_status()
+    return parse_eid_nav_report(response.json(), ticker), str(response.request.url)
+
+
+def merge_nav_records(*groups: list[SseNavRecord]) -> list[SseNavRecord]:
+    records = {
+        record.nav_date: record
+        for group in groups
+        for record in group
+    }
+    return [records[item] for item in sorted(records)]
+
+
+def latest_nav_on_or_before(
+    records: list[SseNavRecord], target_date: date
+) -> Decimal | None:
+    eligible = [record for record in records if record.nav_date <= target_date]
+    return eligible[-1].unit_nav if eligible else None
 
 
 def estimated_scale_cny(scale_wan_shares: Decimal, unit_nav: Decimal) -> Decimal:
@@ -266,6 +338,16 @@ def select_quote_row(history: list[dict[str, str]], requested_date: date | None)
     return requested_date, row
 
 
+def select_quote_rows(
+    history: list[dict[str, str]], requested_date: date | None
+) -> list[tuple[date, dict[str, str]]]:
+    if requested_date is not None:
+        return [select_quote_row(history, requested_date)]
+    if not history:
+        raise RuntimeError("SZSE quote history was empty")
+    return [(date.fromisoformat(row["jyrq"]), row) for row in history]
+
+
 def run_sync(
     *, trade_date: date | None = None, dry_run: bool = False
 ) -> SzseDetailStats:
@@ -308,18 +390,28 @@ def run_sync(
             ticker = listing.ticker
             try:
                 quote_history = fetch_quote_history(client, ticker)
-                resolved_trade_date, quote_row = select_quote_row(quote_history, trade_date)
-                nav_records, nav_source_url = fetch_nav_records(client, ticker)
-                nav_by_date = {record.nav_date: record.unit_nav for record in nav_records}
+                quote_rows = select_quote_rows(quote_history, trade_date)
+                szse_nav_records, _ = fetch_nav_records(client, ticker)
+                eid_nav_records, nav_source_url = fetch_eid_nav_records(
+                    client, ticker, list_snapshot_date
+                )
+                nav_records = merge_nav_records(eid_nav_records, szse_nav_records)
 
                 scale_row = scale_by_ticker.get(ticker)
                 scale_wan_shares = decimal_or_none(scale_row.get("dqgm")) if scale_row else None
                 raw_scale_date = scale_row.get("scale_date") if scale_row else None
                 scale_date = date.fromisoformat(raw_scale_date) if raw_scale_date else list_snapshot_date
-                scale_nav = nav_by_date.get(scale_date)
+                scale_nav = latest_nav_on_or_before(nav_records, scale_date)
 
                 with session.begin_nested():
-                    sync_quote(session, listing.id, quote_row, resolved_trade_date, collected_at)
+                    for resolved_trade_date, quote_row in quote_rows:
+                        sync_quote(
+                            session,
+                            listing.id,
+                            quote_row,
+                            resolved_trade_date,
+                            collected_at,
+                        )
                     sync_nav_daily(session, share_id, nav_records, collected_at, nav_source_url)
                     sync_return_metrics(
                         session,
@@ -339,7 +431,7 @@ def run_sync(
                             collected_at,
                         )
                 funds += 1
-                quotes += 1
+                quotes += len(quote_rows)
                 nav_rows += len(nav_records)
                 scales += int(scale_wan_shares is not None and scale_nav is not None)
             except (httpx.HTTPError, RuntimeError, ValueError, SQLAlchemyError) as exc:

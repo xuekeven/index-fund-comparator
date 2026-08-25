@@ -14,7 +14,7 @@ export interface FilterPreferences {
 const DEFAULT_FILTER_PREFERENCES: FilterPreferences = {
   activeIndex: "csi-500",
   venue: "场内",
-  exchanges: ["上交所"],
+  exchanges: [...EXCHANGES],
   shareClasses: [],
   currencies: [],
 };
@@ -40,7 +40,7 @@ export function readFilterPreferences(): FilterPreferences {
         ? value.activeIndex
         : DEFAULT_FILTER_PREFERENCES.activeIndex,
       venue,
-      exchanges: venue === "场内" ? exchanges.length > 0 ? exchanges : ["上交所"] : [],
+      exchanges: venue === "场内" ? exchanges.length > 0 ? exchanges : [...EXCHANGES] : [],
       shareClasses: venue === "场外" ? stringArray(value.shareClasses) : [],
       currencies: venue === "场外" ? stringArray(value.currencies) : [],
     };
