@@ -15,6 +15,7 @@ CORE_TABLES = {
     "fund_scale",
     "sales_limit_history",
     "calculated_metric",
+    "user_fund_tag",
 }
 
 
@@ -42,3 +43,18 @@ def test_product_scope_excludes_lof() -> None:
     )
 
     assert "LOF" not in str(structure_constraint.sqltext)
+
+
+def test_single_user_tags_are_bound_to_fund_shares() -> None:
+    tag_table = Base.metadata.tables["user_fund_tag"]
+    foreign_keys = {key.target_fullname for key in tag_table.foreign_keys}
+    tag_constraint = next(
+        constraint
+        for constraint in tag_table.constraints
+        if constraint.name == "ck_user_fund_tag_type"
+    )
+
+    assert "fund_share_class.id" in foreign_keys
+    assert "favorite" in str(tag_constraint.sqltext)
+    assert "holding" in str(tag_constraint.sqltext)
+    assert "recurring" in str(tag_constraint.sqltext)

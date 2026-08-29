@@ -1,5 +1,6 @@
 export type DataStatus = "verified" | "delayed" | "estimated" | "sample" | "unavailable";
 export type TradingVenue = "场内" | "场外";
+export type FundTag = "favorite" | "holding" | "recurring";
 
 export interface IndexSummary {
   id: string;
@@ -34,6 +35,9 @@ export interface FundComparisonRow {
   exactBenchmark: string;
   shareClass: string | null;
   currency: string;
+  subscriptionStatus: "open" | "limited" | "suspended" | null;
+  subscriptionLimitAmount: number | null;
+  subscriptionLimitCurrency: string | null;
   exchange: string | null;
   managementFee: number | null;
   custodyFee: number | null;
@@ -52,6 +56,12 @@ export interface FundComparisonRow {
   sourceUrl: string | null;
   sourceTime: string | null;
   note: string | null;
+  tags: FundTag[];
+}
+
+export interface FundTagResponse {
+  fundCode: string;
+  tags: FundTag[];
 }
 
 export interface FundListResponse {

@@ -35,6 +35,10 @@ def test_classifies_ndx_and_excludes_nasdaq_technology() -> None:
     assert classify(row("纳指科技ETF景顺", "NDXTMC")) is None
 
 
+def test_search_terms_include_nasdaq_without_100_suffix() -> None:
+    assert "纳斯达克" in szse_funds.SZSE_SEARCH_TERMS
+
+
 def test_fetch_funds_preserves_official_scale_date(monkeypatch) -> None:
     report = {
         "metadata": {
@@ -67,18 +71,14 @@ def test_product_summary_url_prefers_product_summary() -> None:
 
 
 def test_parse_fee_rates_reads_management_and_custody(monkeypatch) -> None:
-    class Page:
-        def extract_text(self) -> str:
-            return (
-                "基金运作相关费用 管 理 费 固定比例 0.15 % 基金管理人 "
-                "托 管 费 年费率：0.05 % 基金托管人"
-            )
-
-    class Reader:
-        def __init__(self, _content) -> None:
-            self.pages = [Page()]
-
-    monkeypatch.setattr(szse_funds, "PdfReader", Reader)
+    monkeypatch.setattr(
+        szse_funds,
+        "extract_pdf_text",
+        lambda _content: (
+            "基金运作相关费用 管 理 费 固定比例 0.15 % 基金管理人 "
+            "托 管 费 年费率：0.05 % 基金托管人"
+        ),
+    )
 
     assert szse_funds.parse_fee_rates(b"pdf") == {
         "management": Decimal("0.15"),

@@ -2,6 +2,7 @@ import argparse
 import html
 import io
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -12,12 +13,30 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.database import get_session_factory
-from app.database_models import FundProduct, FundShareClass, NavDaily
+from app.database_models import (
+    FundProduct,
+    FundScale,
+    FundShareClass,
+    NavDaily,
+    SalesLimitHistory,
+)
+from app.sync.eid_disclosures import (
+    DisclosureDocument,
+    disclosure_documents as find_disclosure_documents,
+    fetch_disclosure_text,
+    parse_fee_rates,
+    sync_fee_history,
+)
+from app.sync.sse_details import (
+    calculate_return_metrics,
+    load_nav_records as load_return_nav_records,
+    sync_return_metrics,
+)
 from app.sync.sse_funds import ensure_index_master_data
 
 
@@ -28,6 +47,9 @@ EID_DETAIL_URL = f"{EID_BASE_URL}/disclose/fund_detail.do"
 EID_SEARCH_META_URL = f"{EID_BASE_URL}/disclose/publicDailyReportSearchData.json"
 EID_NAV_URL = f"{EID_BASE_URL}/disclose/getPublicFundJZInfoMore.do"
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
+PRODUCT_SUMMARY_LABEL = "基金产品资料概要"
+QUARTERLY_REPORT_LABEL = "季度报告"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -70,10 +92,62 @@ class NavRecord:
 
 
 @dataclass(frozen=True)
+class SummaryShare:
+    code: str
+    display_name: str
+    share_class: str | None
+    currency: str
+    currency_form: str | None
+
+
+@dataclass(frozen=True)
+class ProductSummary:
+    shares: tuple[SummaryShare, ...]
+    rates: dict[str, Decimal]
+    benchmark_description: str | None
+
+    @property
+    def share_codes(self) -> tuple[str, ...]:
+        return tuple(share.code for share in self.shares)
+
+
+@dataclass(frozen=True)
+class SubscriptionState:
+    code: str
+    status: str
+    limit_amount: Decimal | None
+    currency: str
+    effective_date: date
+    source_url: str
+    quality_status: str = "verified"
+
+
+
+@dataclass(frozen=True)
+class ScaleRecord:
+    share_code: str
+    report_date: date
+    amount_cny: Decimal
+
+
+@dataclass(frozen=True)
 class SyncStats:
     products: int
     shares: int
     nav_rows: int
+    fee_shares: int
+    scales: int
+    subscription_states: int
+    failures: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    return_metrics: int = 0
+
+
+@dataclass(frozen=True)
+class CatalogSyncStats:
+    products: int
+    shares: int
+    snapshot_date: date
     failures: tuple[str, ...] = ()
 
 
@@ -96,6 +170,11 @@ NASDAQ_100 = TargetIndex(
     ("QDII",),
 )
 
+TARGET_BY_DEFINITION = {
+    target.definition_id: target
+    for target in (CSI_500, SP_500, NASDAQ_100)
+}
+
 CSI_EXCLUDED_TOKENS = (
     "增强", "量化", "优选", "智选", "行业中性", "低波", "等权", "质量",
     "成长", "价值", "基本面", "ESG", "信息", "自由现金流", "策略",
@@ -107,8 +186,26 @@ def normalize_name(value: str) -> str:
     return re.sub(r"\s+", "", value).replace("（", "(").replace("）", ")").upper()
 
 
-def is_exchange_or_lof_code(code: str) -> bool:
-    return code.startswith(("15", "16", "50", "51", "52", "56", "58"))
+def is_exchange_traded_summary(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    listing = re.search(
+        r"上市交易所及上市日期(.+?)(?:基金类型|基金类别)", compact
+    )
+    if listing:
+        value = re.sub(
+            r"^[（(]若有[）)]",
+            "",
+            listing.group(1),
+        ).strip("-—－/、")
+        if value and value not in {"无", "不适用", "未上市", "暂未上市"}:
+            return True
+    operation = re.search(
+        r"运作方式(.+?)(?:开放频率|基金经理|基金合同存续期)", compact
+    )
+    return bool(
+        operation
+        and any(token in operation.group(1) for token in ("交易型开放式", "上市开放式"))
+    )
 
 
 def classify_product(name: str) -> tuple[TargetIndex, str] | None:
@@ -183,8 +280,6 @@ def parse_product_index(
         if code.isdigit():
             code = code.zfill(6)
         if not re.fullmatch(r"\d{6}", code):
-            continue
-        if is_exchange_or_lof_code(code):
             continue
         name = str(raw_name).strip()
         classified = classify_product(name)
@@ -263,6 +358,595 @@ def fetch_fund_detail(client: httpx.Client, fund_id: int) -> FundDetail:
     return parse_fund_detail(fund_id, response.text)
 
 
+def fetch_fund_detail_document(
+    client: httpx.Client, fund_id: int
+) -> tuple[FundDetail, str]:
+    response = client.get(EID_DETAIL_URL, params={"fundId": fund_id})
+    response.raise_for_status()
+    return parse_fund_detail(fund_id, response.text), response.text
+
+
+def fund_detail_url(fund_id: int) -> str:
+    return f"{EID_DETAIL_URL}?fundId={fund_id}"
+
+
+def disclosure_documents(page_html: str, title_token: str) -> list[DisclosureDocument]:
+    return find_disclosure_documents(
+        page_html,
+        title_token,
+        base_url=EID_DETAIL_URL,
+    )
+
+
+def _code_chunks(value: str) -> tuple[str, ...]:
+    return tuple(value[index:index + 6] for index in range(0, len(value), 6))
+
+
+def _summary_share_name(compact: str, code: str) -> str:
+    patterns = (
+        rf"下属基金简称(.+?)下属基金(?:交易)?代码{code}",
+        rf"基金简称(?:[A-Z])?(.+?)基金代码(?:[A-Z])?{code}",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, compact)
+        if matches:
+            return matches[-1].strip("：:，,；;")
+    return code
+
+
+def parse_product_summary(text: str) -> ProductSummary:
+    compact = re.sub(r"\s+", "", text)
+    subordinate = re.search(r"下属基金(?:交易)?代码((?:\d{6})+)", compact)
+    share_code = re.search(r"份额代码(\d{6})", compact)
+    primary = re.search(r"(?<!下属)基金代码(\d{6})", compact)
+    if subordinate:
+        share_codes = _code_chunks(subordinate.group(1))
+    elif share_code:
+        share_codes = (share_code.group(1),)
+    elif primary:
+        share_codes = (primary.group(1),)
+    else:
+        raise RuntimeError("Fund product summary did not contain a share code")
+
+    shares = tuple(
+        SummaryShare(
+            code=code,
+            display_name=(display_name := _summary_share_name(compact, code)),
+            share_class=share_identity(display_name)[0],
+            currency=share_identity(display_name)[1],
+            currency_form=share_identity(display_name)[2],
+        )
+        for code in share_codes
+    )
+    rates = parse_fee_rates(text, include_sales_service=True)
+
+    benchmark_match = re.search(
+        r"业绩比较基准(.+?)(?:风险收益特征|基金风险等级|\(二\)投资组合)", compact
+    )
+    benchmark = benchmark_match.group(1).strip("。；;") if benchmark_match else None
+    return ProductSummary(shares, rates, benchmark or None)
+
+
+def _announcement_date(compact: str) -> date:
+    date_pattern = r"(20\d{2})[年/-](\d{1,2})[月/-](\d{1,2})日?"
+    effective_match = re.search(
+        rf"(?:暂停(?:大额)?申购起始日|恢复(?:大额)?申购起始日|自)"
+        rf".{{0,20}}?{date_pattern}",
+        compact,
+    )
+    matches = [effective_match.groups()] if effective_match else re.findall(
+        date_pattern, compact
+    )
+    if not matches:
+        raise RuntimeError("Subscription announcement did not contain a date")
+    year, month, day = matches[0]
+    return date(int(year), int(month), int(day))
+
+
+def _announcement_share_codes(
+    compact: str,
+    title: str,
+    shares: dict[str, SummaryShare],
+) -> list[str]:
+    class_match = re.search(
+        r"((?:[A-Z][、和及]?)+)(?:两|三|四)?类(?:基金)?份额",
+        title.upper(),
+    )
+    if class_match:
+        classes = set(re.findall(r"[A-Z]", class_match.group(1)))
+        return [
+            code
+            for code, share in shares.items()
+            if share.share_class in classes
+        ]
+
+    match = re.search(
+        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|下属基金交易代码)"
+        r"((?:\d{6})+)",
+        compact,
+    )
+    if match is None:
+        # Some PDF tables are extracted column-first, leaving the label after
+        # the concatenated codes: ``018966...021773额的交易代码``.
+        match = re.search(r"((?:\d{6})+)额的交易代码", compact)
+    codes = list(_code_chunks(match.group(1))) if match else []
+    codes = [code for code in codes if code in shares]
+    if codes:
+        flag_match = re.search(
+            r"(?:该分级基金是否|该基金份额是否|下属分级基金是否)"
+            r"[^是]{0,160}([是否-]+)(?:2、|2\.|其他|金额单位|下属)",
+            compact,
+        )
+        if flag_match and len(flag_match.group(1)) == len(codes):
+            codes = [
+                code
+                for code, flag in zip(codes, flag_match.group(1), strict=True)
+                if flag == "是"
+            ]
+        return codes
+
+    class_prefix = title.split("类份额", 1)[0][-12:]
+    classes = set(re.findall(r"([A-Z])(?:、|和|及|两|三|四|类)", class_prefix.upper()))
+    if classes:
+        return [
+            code
+            for code, share in shares.items()
+            if share.share_class in classes
+        ]
+    return list(shares)
+
+
+def _announcement_limits(
+    compact: str,
+    shares: dict[str, SummaryShare],
+) -> dict[str, Decimal]:
+    limits: dict[str, Decimal] = {}
+    code_match = re.search(
+        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|下属基金交易代码)"
+        r"((?:\d{6})+)",
+        compact,
+    )
+    if code_match is None:
+        code_match = re.search(r"((?:\d{6})+)额的交易代码", compact)
+    ordered_codes = [
+        code
+        for code in _code_chunks(code_match.group(1) if code_match else "")
+        if code in shares
+    ]
+    table_match = re.search(
+        r"(?:下属分级基金的限制申购金额|下属基金份额的限制金额|限制申购金额)"
+        r"(?:（[^）]+）)?(.+?)(?:下属.*?限制(?:转换|定期)|2[.、]其他)",
+        compact,
+    )
+    if table_match:
+        table_values = re.findall(
+            r"(\d[\d,]*(?:\.\d+)?)(美元|元)",
+            table_match.group(1),
+        )
+        if len(table_values) == len(ordered_codes):
+            for code, (raw_amount, _) in zip(
+                ordered_codes, table_values, strict=True
+            ):
+                limits[code] = Decimal(raw_amount.replace(",", ""))
+        else:
+            # PDF tables often lose their column boundaries during text
+            # extraction, for example ``10.0010.0010.00``.  Two-decimal
+            # values and ``-`` placeholders still preserve the column order.
+            table_tokens = re.findall(
+                r"\d[\d,]*?\.\d{2}|-",
+                table_match.group(1),
+            )
+            if len(table_tokens) >= len(ordered_codes):
+                for code, raw_amount in zip(
+                    ordered_codes,
+                    table_tokens[: len(ordered_codes)],
+                    strict=True,
+                ):
+                    if raw_amount != "-":
+                        limits[code] = Decimal(raw_amount.replace(",", ""))
+
+    common_limit = re.search(
+        r"(?<!下属分级基金的)(?<!下属基金份额的)"
+        r"限制申购(?:（[^）]*）)?金额"
+        r"（单位：(?P<unit>人民币元|美元)）"
+        r"(?P<amount>\d[\d,]*(?:\.\d+)?)",
+        compact,
+    )
+    if common_limit:
+        currency = "美元" if common_limit.group("unit") == "美元" else "人民币"
+        amount = Decimal(common_limit.group("amount").replace(",", ""))
+        for share in shares.values():
+            if share.currency == currency:
+                limits.setdefault(share.code, amount)
+
+    for match in re.finditer(
+        r"(?P<label>(?:本基金)?(?:[A-Z]类[、，及和]?)+基金份额)"
+        r".{0,40}?(?:限制金额|限额)(?:为)?"
+        r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
+        r"(?P<unit>美元|元)",
+        compact,
+    ):
+        classes = set(re.findall(r"([A-Z])类", match.group("label")))
+        currency = "美元" if match.group("unit") == "美元" else "人民币"
+        amount = Decimal(match.group("amount").replace(",", ""))
+        for share in shares.values():
+            if share.currency == currency and share.share_class in classes:
+                limits[share.code] = amount
+
+    scoped_limit = re.search(
+        r"(?:该基金份额的限制金额|调整后限额)(?:为)?"
+        r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
+        r"(?P<unit>美元|元)",
+        compact,
+    )
+    if scoped_limit:
+        currency = "美元" if scoped_limit.group("unit") == "美元" else "人民币"
+        amount = Decimal(scoped_limit.group("amount").replace(",", ""))
+        for share in shares.values():
+            if share.currency == currency:
+                limits.setdefault(share.code, amount)
+
+    cumulative_limit = re.search(
+        r"(?:单日)?累计(?:申购及定期定额投资)?金额"
+        r"(?:应不超过|不超过|不高于|超过|为)?"
+        r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
+        r"(?P<unit>美元|元)(?:以下)?",
+        compact,
+    )
+    if cumulative_limit and len(shares) == 1:
+        currency = "美元" if cumulative_limit.group("unit") == "美元" else "人民币"
+        amount = Decimal(cumulative_limit.group("amount").replace(",", ""))
+        for share in shares.values():
+            if share.currency == currency:
+                limits.setdefault(share.code, amount)
+
+    for match in re.finditer(
+        r"(?P<label>"
+        r"(?:申购)?本基金[^，。；]{0,80}?份额|"
+        r"单个(?:人民币|美元)份额类别|"
+        r"(?:人民币|美元)份额（基金代码：[^）]+(?:（[^）]+）[^）]*)*）"
+        r")"
+        r".{0,260}?"
+        r"(?:业务限额为|累计限额为|累计金额应不超过|累计高于)"
+        r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
+        r"(?P<unit>元人民币|人民币|美元|元)",
+        compact,
+    ):
+        label = normalize_name(match.group("label"))
+        share_classes = set(re.findall(r"([A-Z])类", label))
+        currency = "美元" if "美元" in label or match.group("unit") == "美元" else "人民币"
+        amount = Decimal(match.group("amount").replace(",", ""))
+        candidates = [
+            share
+            for share in shares.values()
+            if share.currency == currency
+            and (not share_classes or share.share_class in share_classes)
+        ]
+        for share in candidates:
+            previous = limits.get(share.code)
+            limits[share.code] = amount if previous is None else min(previous, amount)
+    return limits
+
+
+def parse_subscription_announcement(
+    title: str,
+    text: str,
+    shares: dict[str, SummaryShare],
+    source_url: str,
+) -> list[SubscriptionState]:
+    compact = re.sub(r"\s+", "", text)
+    normalized_title = re.sub(r"\s+", "", title)
+    if "节假日" in normalized_title:
+        return []
+    cancels_limit = (
+        ("取消" in normalized_title or "解除" in normalized_title)
+        and "限制" in normalized_title
+    )
+    limits_large_subscription = "限制大额" in normalized_title
+    if cancels_limit or "恢复大额申购" in normalized_title:
+        status = "open"
+    elif "暂停申购" in normalized_title and "暂停大额申购" not in normalized_title:
+        status = "suspended"
+    elif limits_large_subscription or "大额申购" in normalized_title or (
+        ("申购" in normalized_title or "定投" in normalized_title)
+        and ("金额" in normalized_title or "限制" in normalized_title)
+    ):
+        status = "limited"
+    elif "开放申购" in normalized_title or (
+        "恢复申购" in normalized_title and "暂停申购" not in normalized_title
+    ):
+        status = "open"
+    else:
+        return []
+
+    codes = _announcement_share_codes(compact, normalized_title, shares)
+    scoped_shares = {code: shares[code] for code in codes}
+    limits = _announcement_limits(compact, scoped_shares) if status == "limited" else {}
+    if status == "limited" and limits:
+        codes = [code for code in codes if code in limits]
+    effective_date = _announcement_date(compact)
+    return [
+        SubscriptionState(
+            code=code,
+            status=status,
+            limit_amount=limits.get(code),
+            currency=shares[code].currency,
+            effective_date=effective_date,
+            source_url=source_url,
+        )
+        for code in codes
+    ]
+
+
+def subscription_documents(detail_html: str) -> list[DisclosureDocument]:
+    return [
+        document
+        for document in disclosure_documents(detail_html, "")
+        if any(
+            token in document.title
+            for token in ("申购", "定投", "金额", "限制", "暂停", "恢复", "大额")
+        )
+        and ("申购" in document.title or "定投" in document.title)
+        and "节假日" not in document.title
+    ][:12]
+
+
+def discover_subscription_shares(
+    announcements: list[tuple[DisclosureDocument, str]],
+    product_name: str,
+) -> dict[str, tuple[SummaryShare, str]]:
+    discovered: dict[str, tuple[SummaryShare, str]] = {}
+    for document, text in announcements:
+        compact = re.sub(r"\s+", "", text)
+        code_match = re.search(
+            r"(?:下属分级基金的交易代码|下属基金份额的交易代码|"
+            r"下属基金的交易代码|下属基金交易代码)((?:\d{6})+)",
+            compact,
+        )
+        if code_match is None:
+            code_match = re.search(r"((?:\d{6})+)额的交易代码", compact)
+        codes = _code_chunks(code_match.group(1)) if code_match else ()
+        unit_match = re.search(
+            r"金额单位((?:人民币元|美元)+)下属基金份额的限制申购金额",
+            compact,
+        )
+        units = (
+            re.findall(r"人民币元|美元", unit_match.group(1))
+            if unit_match
+            else []
+        )
+        name_block_match = re.search(
+            r"下属(?:分级)?基金(?:份额)?的(?:基金)?简称(.+?)"
+            r"下属(?:分级)?基金(?:份额)?的交易代码",
+            compact,
+        )
+        explicit_names: list[str] = []
+        name_suffixes: list[str] = []
+        if name_block_match:
+            name_block = name_block_match.group(1)
+            name_bases = (
+                product_name,
+                product_name.replace("发起式", ""),
+                product_name.replace("发起", ""),
+            )
+            for name_base in dict.fromkeys(name_bases):
+                name_parts = name_block.split(name_base)
+                if len(name_parts) - 1 == len(codes):
+                    name_suffixes = name_parts[1:]
+                    explicit_names = [
+                        f"{name_base}{suffix}" for suffix in name_suffixes
+                    ]
+                    break
+        for index, code in enumerate(codes):
+            explicit_display_name = (
+                explicit_names[index]
+                if index < len(explicit_names)
+                else None
+            )
+            contexts = re.findall(
+                rf"([^，。；]{{0,100}}?)(?:基金)?份额[（(]基金代码[：:]"
+                rf"{code}[）)]",
+                compact,
+            )
+            context = (
+                name_suffixes[index]
+                if index < len(name_suffixes)
+                else contexts[-1]
+                if contexts
+                else ""
+            )
+            share_class_match = re.search(r"([A-Z])类", context.upper())
+            if share_class_match is None:
+                share_class_match = re.search(r"([A-Z])", context.upper())
+            share_class = (
+                share_class_match.group(1) if share_class_match else None
+            )
+            _, currency, currency_form = share_identity(context)
+            if index < len(units):
+                currency = "美元" if units[index] == "美元" else "人民币"
+            suffix = share_class or ""
+            if currency == "美元":
+                suffix += f"（美元{currency_form or ''}）"
+            display_name = explicit_display_name or f"{product_name}{suffix}"
+            merge_summary_share(
+                discovered,
+                SummaryShare(
+                    code,
+                    display_name,
+                    share_class,
+                    currency,
+                    currency_form,
+                ),
+                document.url,
+            )
+    return discovered
+
+
+def merge_summary_share(
+    shares: dict[str, tuple[SummaryShare, str]],
+    share: SummaryShare,
+    source_url: str,
+) -> None:
+    """Keep the most specific official share name found across disclosures."""
+
+    def specificity(item: SummaryShare) -> tuple[int, int, int, int]:
+        compact_name = normalize_name(item.display_name)
+        return (
+            int(item.share_class is not None),
+            int(item.currency != "人民币" or "人民币" in compact_name),
+            int(item.currency_form is not None),
+            len(compact_name) if item.display_name != item.code else 0,
+        )
+
+    existing = shares.get(share.code)
+    if existing is None or specificity(share) > specificity(existing[0]):
+        shares[share.code] = (share, source_url)
+
+
+def fetch_subscription_announcements(
+    client: httpx.Client,
+    detail_html: str,
+) -> tuple[list[tuple[DisclosureDocument, str]], list[str]]:
+    announcements: list[tuple[DisclosureDocument, str]] = []
+    warnings: list[str] = []
+    for document in subscription_documents(detail_html):
+        try:
+            announcements.append(
+                (document, fetch_disclosure_text(client, document))
+            )
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            warnings.append(f"{document.title}: {exc}")
+    return announcements, warnings
+
+
+def resolve_subscription_states(
+    announcements: list[tuple[DisclosureDocument, str]],
+    shares: dict[str, SummaryShare],
+    snapshot_date: date,
+    detail_url: str,
+) -> tuple[dict[str, SubscriptionState], list[str]]:
+    states: dict[str, SubscriptionState] = {}
+    warnings: list[str] = []
+    for document, text in announcements:
+        if len(states) == len(shares):
+            break
+        try:
+            for state in parse_subscription_announcement(
+                document.title, text, shares, document.url
+            ):
+                states.setdefault(state.code, state)
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            warnings.append(f"{document.title}: {exc}")
+
+    return states, warnings
+
+
+def sync_subscription_state(
+    session: Session,
+    share_id: int,
+    state: SubscriptionState,
+    collected_at: datetime,
+) -> None:
+    effective_from = datetime.combine(
+        state.effective_date, time.min, tzinfo=ASIA_SHANGHAI
+    )
+    existing = session.scalar(
+        select(SalesLimitHistory)
+        .where(
+            SalesLimitHistory.fund_share_class_id == share_id,
+            SalesLimitHistory.channel == "全部渠道",
+            SalesLimitHistory.investor_type == "全部投资者",
+            SalesLimitHistory.business_type == "申购",
+            SalesLimitHistory.effective_to.is_(None),
+        )
+        .order_by(SalesLimitHistory.effective_from.desc(), SalesLimitHistory.id.desc())
+        .limit(1)
+    )
+    if (
+        existing is not None
+        and existing.limit_status == state.status
+        and existing.limit_amount == state.limit_amount
+        and existing.currency == state.currency
+    ):
+        existing.source_url = state.source_url
+        existing.source_time = effective_from
+        existing.collected_at = collected_at
+        existing.quality_status = state.quality_status
+        return
+    if existing is not None:
+        existing.effective_to = max(effective_from, existing.effective_from or effective_from)
+    session.add(
+        SalesLimitHistory(
+            fund_share_class_id=share_id,
+            channel="全部渠道",
+            investor_type="全部投资者",
+            business_type="申购",
+            limit_amount=state.limit_amount,
+            currency=state.currency,
+            limit_status=state.status,
+            source_url=state.source_url,
+            source_time=effective_from,
+            effective_from=effective_from,
+            collected_at=collected_at,
+            quality_status=state.quality_status,
+        )
+    )
+
+
+def _quarter_end(year: int, quarter: int) -> date:
+    return date(year, quarter * 3, 31 if quarter in (1, 4) else 30)
+
+
+def _report_year(value: str) -> int:
+    digits = value.translate(
+        str.maketrans("〇零一二三四五六七八九", "00123456789")
+    )
+    return int(digits)
+
+
+def parse_quarterly_scales(text: str) -> list[ScaleRecord]:
+    compact = re.sub(r"\s+", "", text)
+    period = re.search(
+        r"([0-9〇零一二三四五六七八九]{4})年第?([一二三四1-4])季度报告",
+        compact,
+    )
+    if period is None:
+        raise RuntimeError("Quarterly report did not contain a report period")
+    quarter_map = {"一": 1, "二": 2, "三": 3, "四": 4}
+    raw_quarter = period.group(2)
+    quarter = quarter_map.get(raw_quarter, int(raw_quarter) if raw_quarter.isdigit() else 0)
+    report_date = _quarter_end(_report_year(period.group(1)), quarter)
+
+    codes_match = re.search(
+        r"下属(?:分级)?基金的交易代码((?:\d{6})+)", compact
+    )
+    if codes_match:
+        share_codes = _code_chunks(codes_match.group(1))
+    else:
+        code_match = re.search(
+            r"(?:基金主代码|基金代码|交易代码)(\d{6})",
+            compact,
+        )
+        if code_match is None:
+            raise RuntimeError("Quarterly report did not contain share codes")
+        share_codes = (code_match.group(1),)
+
+    values_match = re.search(
+        r"(?:4\.)?期末基金资产净值(.+?)"
+        r"(?:5\.期末基金份.*?额净值|期末基金份额净值)", compact
+    )
+    if values_match is None:
+        raise RuntimeError("Quarterly report did not contain ending net assets")
+    values = re.findall(r"(?:\d[\d,]*\.\d{2}|-)", values_match.group(1))
+    if len(values) < len(share_codes):
+        raise RuntimeError("Quarterly report share codes and net assets did not align")
+    return [
+        ScaleRecord(code, report_date, Decimal(raw.replace(",", "")))
+        for code, raw in zip(share_codes, values, strict=False)
+        if raw != "-"
+    ]
+
+
 def fetch_max_valuation_date(client: httpx.Client) -> date:
     response = client.post(EID_SEARCH_META_URL, data={"reportTypeStatus": "01"})
     response.raise_for_status()
@@ -284,7 +968,13 @@ def discovery_name(name: str) -> str:
     return value.strip()
 
 
-def nav_query_data(name: str, start_date: date, end_date: date) -> str:
+def nav_query_data(
+    name: str,
+    start_date: date,
+    end_date: date,
+    *,
+    fund_code: str = "",
+) -> str:
     data = [
         {"name": "sEcho", "value": 1},
         {"name": "iColumns", "value": 5},
@@ -293,7 +983,7 @@ def nav_query_data(name: str, start_date: date, end_date: date) -> str:
         {"name": "iDisplayLength", "value": 500},
         {"name": "fundType", "value": "all"},
         {"name": "fundCompanyShortName", "value": ""},
-        {"name": "fundCode", "value": ""},
+        {"name": "fundCode", "value": fund_code},
         {"name": "fundName", "value": quote(discovery_name(name), safe="")},
         {"name": "startDate", "value": start_date.isoformat()},
         {"name": "endDate", "value": end_date.isoformat()},
@@ -310,9 +1000,15 @@ def _decimal(value: Any) -> Decimal | None:
 
 
 def share_identity(display_name: str) -> tuple[str | None, str, str | None]:
-    compact = normalize_name(display_name)
-    currency = "美元" if "美元" in compact else "人民币"
-    currency_form = "现汇" if "现汇" in compact else "现钞" if "现钞" in compact else None
+    compact = normalize_name(display_name).replace("(", "").replace(")", "")
+    currency = "美元" if any(token in compact for token in ("美元", "美汇", "美钞")) else "人民币"
+    currency_form = (
+        "现汇"
+        if any(token in compact for token in ("现汇", "美汇"))
+        else "现钞"
+        if any(token in compact for token in ("现钞", "美钞"))
+        else None
+    )
     for pattern in (
         r"(?:人民币|美元(?:现汇|现钞)?)?([A-Z])$",
         r"([A-Z])(?:人民币|美元(?:现汇|现钞)?)$",
@@ -349,21 +1045,62 @@ def parse_nav_rows(rows: list[dict[str, Any]], fund_id: int) -> list[NavRecord]:
 
 
 def fetch_nav_records(
-    client: httpx.Client, fund_id: int, name: str, end_date: date
+    client: httpx.Client,
+    fund_id: int,
+    name: str,
+    end_date: date,
+    *,
+    lookback_days: int = 45,
+    fund_code: str = "",
 ) -> list[NavRecord]:
-    response = client.get(
-        EID_NAV_URL,
-        params={
-            "aoData": nav_query_data(
-                name, end_date - timedelta(days=45), end_date
+    rows: list[dict[str, Any]] = []
+    window_start = end_date - timedelta(days=lookback_days)
+    while window_start <= end_date:
+        # The endpoint returns an empty result for a roughly one-year query,
+        # even when matching rows exist. Keep each request within the proven
+        # working recent-NAV range and merge the windows locally.
+        window_end = min(window_start + timedelta(days=45), end_date)
+        payload: dict[str, Any] = {}
+        for attempt in range(3):
+            response = client.get(
+                EID_NAV_URL,
+                params={
+                    "aoData": nav_query_data(
+                        name,
+                        window_start,
+                        window_end,
+                        fund_code=fund_code,
+                    )
+                },
             )
-        },
+            response.raise_for_status()
+            payload = response.json()
+            message = str(payload.get("message") or "")
+            if payload.get("success") is not False:
+                break
+            if "请求繁忙" not in message or attempt == 2:
+                raise RuntimeError(message or "EID NAV query failed")
+        rows.extend(payload.get("aaData") or [])
+        window_start = window_end + timedelta(days=1)
+    return parse_nav_rows(rows, fund_id)
+
+
+def nav_lookback_days(
+    session: Session,
+    product_id: int,
+    end_date: date,
+) -> int:
+    earliest = session.scalar(
+        select(NavDaily.nav_date)
+        .join(
+            FundShareClass,
+            FundShareClass.id == NavDaily.fund_share_class_id,
+        )
+        .where(FundShareClass.fund_product_id == product_id)
+        .order_by(NavDaily.nav_date)
+        .limit(1)
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("success") is False:
-        raise RuntimeError(str(payload.get("message") or "EID NAV query failed"))
-    return parse_nav_rows(payload.get("aaData") or [], fund_id)
+    return 400 if earliest is None or earliest > end_date - timedelta(days=370) else 45
 
 
 def sync_fund(
@@ -371,11 +1108,14 @@ def sync_fund(
     candidate: ProductCandidate,
     detail: FundDetail,
     nav_records: list[NavRecord],
+    summary_shares: dict[str, tuple[SummaryShare, str]],
     snapshot_time: datetime,
     collected_at: datetime,
-) -> tuple[int, int]:
+    benchmark_description: str | None = None,
+) -> tuple[int, dict[str, int], int]:
     canonical_code = f"csrc:{detail.fund_id}"
     product_values = {
+        "registration_code": candidate.code,
         "name": detail.full_name,
         "fund_company": detail.manager,
         "product_structure": candidate.product_structure,
@@ -383,8 +1123,11 @@ def sync_fund(
         "investment_scopes": list(candidate.target.investment_scopes),
         "tracking_method": "被动指数",
         "exact_benchmark_id": candidate.target.definition_id,
-        "benchmark_description": candidate.target.benchmark_description,
+        "benchmark_description": (
+            benchmark_description or candidate.target.benchmark_description
+        ),
         "inception_date": detail.inception_date or candidate.inception_date,
+        "status": "active",
         "source_url": f"{EID_DETAIL_URL}?fundId={detail.fund_id}",
         "source_time": snapshot_time,
         "effective_from": snapshot_time,
@@ -412,21 +1155,70 @@ def sync_fund(
         previous = latest_by_code.get(record.code)
         if previous is None or record.nav_date > previous.nav_date:
             latest_by_code[record.code] = record
-    for code, record in latest_by_code.items():
+
+    share_codes = set(latest_by_code) | set(summary_shares)
+    for code in sorted(share_codes):
+        record = latest_by_code.get(code)
+        summary_source = summary_shares.get(code)
+        # NAV rows occasionally expose only the product-level short name (for
+        # example, 050025 without its A suffix). Product summaries are the
+        # authoritative source for share-class identity, so prefer their
+        # explicit name/metadata whenever available and still sync the NAV row
+        # separately below.
+        if (
+            summary_source is not None
+            and summary_source[0].display_name != code
+        ):
+            summary_share, source_url = summary_source
+            display_name = summary_share.display_name
+            share_class = summary_share.share_class
+            currency = summary_share.currency
+            currency_form = summary_share.currency_form
+            source_time = snapshot_time
+            quality_status = "verified"
+        elif record is not None:
+            display_name = record.display_name
+            share_class = record.share_class
+            currency = record.currency
+            currency_form = record.currency_form
+            source_url = EID_NAV_URL
+            source_time = datetime.combine(
+                record.nav_date, time.min, tzinfo=ASIA_SHANGHAI
+            )
+            quality_status = "verified"
+        elif summary_source is not None:
+            summary_share, source_url = summary_source
+            display_name = summary_share.display_name
+            if display_name == code:
+                currency_label = (
+                    f"（{summary_share.currency}{summary_share.currency_form or ''}）"
+                    if summary_share.currency != "人民币"
+                    else ""
+                )
+                display_name = (
+                    f"{detail.short_name}{summary_share.share_class or ''}"
+                    f"{currency_label}"
+                )
+            share_class = summary_share.share_class
+            currency = summary_share.currency
+            currency_form = summary_share.currency_form
+            source_time = snapshot_time
+            quality_status = "verified"
+        else:
+            continue
         share_values = {
             "fund_product_id": product_id,
-            "display_name": record.display_name,
-            "share_class": record.share_class,
-            "currency": record.currency,
-            "currency_form": record.currency_form,
+            "display_name": display_name,
+            "share_class": share_class,
+            "currency": currency,
+            "currency_form": currency_form,
             "inception_date": candidate.inception_date if code == candidate.code else None,
-            "source_url": EID_NAV_URL,
-            "source_time": datetime.combine(
-                record.nav_date, time.min, tzinfo=ASIA_SHANGHAI
-            ),
+            "status": "active",
+            "source_url": source_url,
+            "source_time": source_time,
             "effective_from": snapshot_time,
             "collected_at": collected_at,
-            "quality_status": "verified",
+            "quality_status": quality_status,
         }
         share_statement = insert(FundShareClass).values(code=code, **share_values)
         session.execute(
@@ -466,29 +1258,200 @@ def sync_fund(
                 constraint="uq_nav_daily_share_date", set_=values
             )
         )
-    return len(share_ids), len(nav_records)
+    return product_id, share_ids, len(nav_records)
 
 
-def run_sync(*, dry_run: bool = False, limit: int | None = None) -> SyncStats:
+def sync_scale_history(
+    session: Session,
+    share_id: int,
+    record: ScaleRecord,
+    collected_at: datetime,
+    source_url: str,
+) -> None:
+    source_time = datetime.combine(
+        record.report_date, time.min, tzinfo=ASIA_SHANGHAI
+    )
+    existing = session.scalar(
+        select(FundScale)
+        .where(
+            FundScale.fund_share_class_id == share_id,
+            FundScale.report_date == record.report_date,
+        )
+        .order_by(FundScale.id.desc())
+        .limit(1)
+    )
+    values = {
+        "amount": record.amount_cny,
+        "amount_cny": record.amount_cny,
+        "currency": "人民币",
+        "source_url": source_url,
+        "source_time": source_time,
+        "effective_from": source_time,
+        "collected_at": collected_at,
+        "quality_status": "verified",
+    }
+    if existing is None:
+        session.add(
+            FundScale(
+                fund_share_class_id=share_id,
+                report_date=record.report_date,
+                **values,
+            )
+        )
+        return
+    for key, value in values.items():
+        setattr(existing, key, value)
+
+
+def sync_catalog_candidate(
+    session: Session,
+    candidate: ProductCandidate,
+    detail: FundDetail,
+    snapshot_time: datetime,
+    collected_at: datetime,
+    source_url: str,
+) -> tuple[int, int]:
+    product_values = {
+        "registration_code": candidate.code,
+        "name": detail.full_name,
+        "fund_company": detail.manager,
+        "product_structure": candidate.product_structure,
+        "trading_venue": "仅场外",
+        "investment_scopes": list(candidate.target.investment_scopes),
+        "tracking_method": "被动指数",
+        "exact_benchmark_id": candidate.target.definition_id,
+        "benchmark_description": candidate.target.benchmark_description,
+        "inception_date": detail.inception_date or candidate.inception_date,
+        "status": "active",
+        "source_url": source_url,
+        "source_time": snapshot_time,
+        "effective_from": snapshot_time,
+        "collected_at": collected_at,
+        "quality_status": "verified",
+    }
+    canonical_code = f"csrc:{detail.fund_id}"
+    statement = insert(FundProduct).values(
+        canonical_code=canonical_code,
+        **product_values,
+    )
+    session.execute(
+        statement.on_conflict_do_update(
+            constraint="uq_fund_product_canonical_code",
+            set_={**product_values, "updated_at": collected_at},
+        )
+    )
+    product_id = session.scalar(
+        select(FundProduct.id).where(
+            FundProduct.canonical_code == canonical_code
+        )
+    )
+    if product_id is None:
+        raise RuntimeError(f"Catalog product upsert failed for {candidate.code}")
+
+    display_name = detail.short_name or candidate.name
+    share_class, currency, currency_form = share_identity(display_name)
+    share_values = {
+        "fund_product_id": product_id,
+        "display_name": display_name,
+        "share_class": share_class,
+        "currency": currency,
+        "currency_form": currency_form,
+        "inception_date": detail.inception_date or candidate.inception_date,
+        "status": "active",
+        "source_url": source_url,
+        "source_time": snapshot_time,
+        "effective_from": snapshot_time,
+        "collected_at": collected_at,
+        "quality_status": "verified",
+    }
+    share_statement = insert(FundShareClass).values(
+        code=candidate.code,
+        **share_values,
+    )
+    # Script E owns the low-frequency catalog/master-data lifecycle. When a
+    # share already exists, do not replace the richer A/C/E and currency
+    # identity populated by script F with the product-level catalog short name.
+    catalog_share_updates = {
+        key: value
+        for key, value in share_values.items()
+        if key
+        not in {
+            "display_name",
+            "share_class",
+            "currency",
+            "currency_form",
+        }
+    }
+    session.execute(
+        share_statement.on_conflict_do_update(
+            index_elements=[FundShareClass.code],
+            set_={**catalog_share_updates, "updated_at": collected_at},
+        )
+    )
+    share_id = session.scalar(
+        select(FundShareClass.id).where(FundShareClass.code == candidate.code)
+    )
+    if share_id is None:
+        raise RuntimeError(f"Catalog share upsert failed for {candidate.code}")
+    return product_id, share_id
+
+
+def should_retire_stale_catalog_products(
+    *,
+    failures: list[str],
+    codes: tuple[str, ...] | None,
+    limit: int | None,
+) -> bool:
+    """Only a successful, complete catalogue run may retire missing products."""
+
+    return not failures and not codes and limit is None
+
+
+def run_sync(
+    *,
+    dry_run: bool = False,
+    limit: int | None = None,
+    codes: tuple[str, ...] | None = None,
+) -> CatalogSyncStats:
     headers = {"User-Agent": "index-fund-comparator/0.1"}
     transport = httpx.HTTPTransport(retries=2)
+    collected_at = datetime.now(UTC)
     with httpx.Client(
-        timeout=httpx.Timeout(20, connect=10),
+        timeout=httpx.Timeout(40, connect=10),
         headers=headers,
         transport=transport,
     ) as client:
         content, index_url = fetch_product_index(client)
         candidates, snapshot_date = parse_product_index(
-            content, fallback_snapshot_date=snapshot_date_from_url(index_url)
+            content,
+            fallback_snapshot_date=snapshot_date_from_url(index_url),
         )
+        if codes:
+            requested_codes = {
+                code.strip().zfill(6) for code in codes if code.strip()
+            }
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.code in requested_codes
+            ]
+            found_codes = {candidate.code for candidate in candidates}
+            missing_codes = sorted(requested_codes - found_codes)
+            if missing_codes:
+                raise RuntimeError(
+                    "Requested codes were not eligible index candidates: "
+                    + ", ".join(missing_codes)
+                )
         if limit is not None:
             candidates = candidates[:limit]
-        max_nav_date = fetch_max_valuation_date(client)
+
         snapshot_time = datetime.combine(
-            snapshot_date, time.min, tzinfo=ASIA_SHANGHAI
+            snapshot_date,
+            time.min,
+            tzinfo=ASIA_SHANGHAI,
         )
-        collected_at = datetime.now(UTC)
-        products = shares = nav_rows = 0
+        products = shares = 0
+        active_product_ids: list[int] = []
         failures: list[str] = []
         with get_session_factory()() as session:
             ensure_index_master_data(session, snapshot_time, source_url=index_url)
@@ -497,44 +1460,485 @@ def run_sync(*, dry_run: bool = False, limit: int | None = None) -> SyncStats:
                     with session.begin_nested():
                         fund_id = validate_fund_code(client, candidate.code)
                         detail = fetch_fund_detail(client, fund_id)
-                        records = fetch_nav_records(
-                            client,
-                            fund_id,
-                            detail.short_name or candidate.name,
-                            max_nav_date,
+                        classified = classify_product(detail.full_name)
+                        if classified is None:
+                            continue
+                        target, structure = classified
+                        resolved_candidate = ProductCandidate(
+                            candidate.code,
+                            candidate.name,
+                            candidate.inception_date,
+                            target,
+                            structure,
                         )
-                        if not records:
-                            records = fetch_nav_records(
-                                client, fund_id, candidate.name, max_nav_date
-                            )
-                        if not records:
-                            raise RuntimeError("no recent valid NAV/share rows")
-                        synced_shares, synced_nav = sync_fund(
+                        product_id, _ = sync_catalog_candidate(
                             session,
-                            candidate,
+                            resolved_candidate,
                             detail,
-                            records,
                             snapshot_time,
                             collected_at,
+                            fund_detail_url(fund_id),
                         )
+                        active_product_ids.append(product_id)
                     products += 1
-                    shares += synced_shares
-                    nav_rows += synced_nav
+                    shares += 1
                 except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                     failures.append(f"{candidate.code} {candidate.name}: {exc}")
             if products == 0:
                 session.rollback()
-                raise RuntimeError("CSRC sync produced no products")
+                raise RuntimeError("CSRC catalog sync produced no products")
+            if should_retire_stale_catalog_products(
+                failures=failures,
+                codes=codes,
+                limit=limit,
+            ):
+                stale_product_ids = list(
+                    session.scalars(
+                        select(FundProduct.id).where(
+                            FundProduct.canonical_code.like("csrc:%"),
+                            FundProduct.trading_venue == "仅场外",
+                            FundProduct.status == "active",
+                            FundProduct.id.not_in(active_product_ids),
+                        )
+                    )
+                )
+                if stale_product_ids:
+                    session.execute(
+                        update(FundProduct)
+                        .where(FundProduct.id.in_(stale_product_ids))
+                        .values(status="inactive", updated_at=collected_at)
+                    )
+                    session.execute(
+                        update(FundShareClass)
+                        .where(
+                            FundShareClass.fund_product_id.in_(stale_product_ids)
+                        )
+                        .values(status="inactive", updated_at=collected_at)
+                    )
             if dry_run:
                 session.rollback()
             else:
                 session.commit()
-    return SyncStats(products, shares, nav_rows, tuple(failures))
+    return CatalogSyncStats(products, shares, snapshot_date, tuple(failures))
+
+
+def run_details_sync(
+    *,
+    dry_run: bool = False,
+    limit: int | None = None,
+    codes: tuple[str, ...] | None = None,
+) -> SyncStats:
+    headers = {"User-Agent": "index-fund-comparator/0.1"}
+    transport = httpx.HTTPTransport(retries=2)
+    with httpx.Client(
+        timeout=httpx.Timeout(40, connect=10),
+        headers=headers,
+        transport=transport,
+    ) as client:
+        max_nav_date = fetch_max_valuation_date(client)
+        snapshot_date = max_nav_date
+        snapshot_time = datetime.combine(
+            snapshot_date, time.min, tzinfo=ASIA_SHANGHAI
+        )
+        collected_at = datetime.now(UTC)
+        products = shares = nav_rows = fee_shares = scales = subscription_states = 0
+        return_metrics = 0
+        failures: list[str] = []
+        warnings: list[str] = []
+        with get_session_factory()() as session:
+            ensure_index_master_data(
+                session,
+                snapshot_time,
+                source_url=EID_SEARCH_META_URL,
+            )
+            stored_products = list(
+                session.scalars(
+                    select(FundProduct)
+                    .where(
+                        FundProduct.canonical_code.like("csrc:%"),
+                        FundProduct.trading_venue == "仅场外",
+                        FundProduct.status == "active",
+                    )
+                    .order_by(FundProduct.registration_code, FundProduct.id)
+                )
+            )
+            share_codes_by_product: dict[int, list[str]] = {}
+            for product_id, share_code in session.execute(
+                select(
+                    FundShareClass.fund_product_id,
+                    FundShareClass.code,
+                ).where(FundShareClass.status == "active")
+            ):
+                share_codes_by_product.setdefault(product_id, []).append(
+                    share_code
+                )
+
+            requested_codes = {
+                code.strip().zfill(6) for code in (codes or ()) if code.strip()
+            }
+            targets: list[tuple[FundProduct, ProductCandidate, int]] = []
+            matched_codes: set[str] = set()
+            for product in stored_products:
+                target = TARGET_BY_DEFINITION.get(product.exact_benchmark_id or "")
+                product_codes = share_codes_by_product.get(product.id, [])
+                registration_code = product.registration_code or (
+                    product_codes[0] if product_codes else ""
+                )
+                if target is None or not re.fullmatch(r"\d{6}", registration_code):
+                    continue
+                if requested_codes:
+                    matches = requested_codes.intersection(
+                        {registration_code, *product_codes}
+                    )
+                    if not matches:
+                        continue
+                    matched_codes.update(matches)
+                try:
+                    fund_id = int(product.canonical_code.removeprefix("csrc:"))
+                except ValueError:
+                    failures.append(
+                        f"{registration_code} {product.name}: invalid canonical code"
+                    )
+                    continue
+                targets.append(
+                    (
+                        product,
+                        ProductCandidate(
+                            registration_code,
+                            product.name,
+                            product.inception_date,
+                            target,
+                            product.product_structure,
+                        ),
+                        fund_id,
+                    )
+                )
+            missing_codes = sorted(requested_codes - matched_codes)
+            if missing_codes:
+                raise RuntimeError(
+                    "Requested codes were not active script E targets: "
+                    + ", ".join(missing_codes)
+                )
+            if limit is not None:
+                targets = targets[:limit]
+            if not targets:
+                raise RuntimeError(
+                    "No active CSRC off-exchange targets found; run script E first"
+                )
+
+            for stored_product, candidate, fund_id in targets:
+                try:
+                    with session.begin_nested():
+                        detail, detail_html = fetch_fund_detail_document(
+                            client, fund_id
+                        )
+                        detail_classified = classify_product(detail.full_name)
+                        if detail_classified is None:
+                            continue
+                        detail_target, detail_structure = detail_classified
+                        candidate = ProductCandidate(
+                            candidate.code,
+                            candidate.name,
+                            candidate.inception_date,
+                            detail_target,
+                            detail_structure,
+                        )
+                        lookback_days = nav_lookback_days(
+                            session,
+                            stored_product.id,
+                            max_nav_date,
+                        )
+                        query_name = detail.short_name or candidate.name
+                        records = fetch_nav_records(
+                            client,
+                            fund_id,
+                            query_name,
+                            max_nav_date,
+                            lookback_days=lookback_days,
+                        )
+                        if (
+                            not records
+                            and discovery_name(candidate.name)
+                            != discovery_name(query_name)
+                        ):
+                            records = fetch_nav_records(
+                                client,
+                                fund_id,
+                                candidate.name,
+                                max_nav_date,
+                                lookback_days=lookback_days,
+                            )
+                        if not records:
+                            by_identity: dict[
+                                tuple[str, date], NavRecord
+                            ] = {}
+                            fallback_codes = (
+                                share_codes_by_product.get(stored_product.id)
+                                or [candidate.code]
+                            )
+                            for share_code in fallback_codes:
+                                for record in fetch_nav_records(
+                                    client,
+                                    fund_id,
+                                    "",
+                                    max_nav_date,
+                                    lookback_days=lookback_days,
+                                    fund_code=share_code,
+                                ):
+                                    by_identity[(record.code, record.nav_date)] = record
+                            records = sorted(
+                                by_identity.values(),
+                                key=lambda item: (item.code, item.nav_date),
+                            )
+                        if not records:
+                            raise RuntimeError(
+                                "no valid NAV rows by fund name or registered share codes"
+                            )
+
+                        exchange_traded: bool | None = None
+                        summaries: list[
+                            tuple[DisclosureDocument, ProductSummary]
+                        ] = []
+                        for document in disclosure_documents(
+                            detail_html, PRODUCT_SUMMARY_LABEL
+                        ):
+                            try:
+                                summary_text = fetch_disclosure_text(
+                                    client, document
+                                )
+                                if exchange_traded is None:
+                                    exchange_traded = is_exchange_traded_summary(
+                                        summary_text
+                                    )
+                                summaries.append(
+                                    (
+                                        document,
+                                        parse_product_summary(summary_text),
+                                    )
+                                )
+                            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                                warnings.append(
+                                    f"{candidate.code} {document.title}: {exc}"
+                                )
+                        if exchange_traded:
+                            continue
+                        if not summaries:
+                            warnings.append(
+                                f"{candidate.code} {candidate.name}: "
+                                "no usable product summary"
+                            )
+
+                        scale_document: DisclosureDocument | None = None
+                        scale_records: list[ScaleRecord] = []
+                        quarterly_documents = disclosure_documents(
+                            detail_html, QUARTERLY_REPORT_LABEL
+                        )
+                        if quarterly_documents:
+                            scale_document = quarterly_documents[0]
+                            try:
+                                report_text = fetch_disclosure_text(
+                                    client, scale_document
+                                )
+                                scale_records = parse_quarterly_scales(
+                                    report_text
+                                )
+                            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                                warnings.append(
+                                    f"{candidate.code} "
+                                    f"{scale_document.title}: {exc}"
+                                )
+                        else:
+                            warnings.append(
+                                f"{candidate.code} {candidate.name}: "
+                                "no quarterly report"
+                            )
+
+                        benchmark = next(
+                            (
+                                summary.benchmark_description
+                                for _, summary in summaries
+                                if summary.benchmark_description
+                            ),
+                            None,
+                        )
+                        summary_shares: dict[
+                            str, tuple[SummaryShare, str]
+                        ] = {}
+                        for document, summary in summaries:
+                            for summary_share in summary.shares:
+                                merge_summary_share(
+                                    summary_shares,
+                                    summary_share,
+                                    document.url,
+                                )
+                        announcements, announcement_warnings = (
+                            fetch_subscription_announcements(
+                                client, detail_html
+                            )
+                        )
+                        warnings.extend(
+                            f"{candidate.code} {warning}"
+                            for warning in announcement_warnings
+                        )
+                        for code, discovered_share in (
+                            discover_subscription_shares(
+                                announcements,
+                                detail.short_name or candidate.name,
+                            ).items()
+                        ):
+                            merge_summary_share(
+                                summary_shares,
+                                discovered_share[0],
+                                discovered_share[1],
+                            )
+                        _, share_ids, synced_nav = sync_fund(
+                            session,
+                            candidate,
+                            detail,
+                            records,
+                            summary_shares,
+                            snapshot_time,
+                            collected_at,
+                            benchmark,
+                        )
+                        synced_return_metrics = 0
+                        for share_id in share_ids.values():
+                            metrics = calculate_return_metrics(
+                                load_return_nav_records(session, share_id)
+                            )
+                            sync_return_metrics(
+                                session,
+                                share_id,
+                                candidate.target.definition_id,
+                                metrics,
+                                collected_at,
+                                EID_NAV_URL,
+                            )
+                            synced_return_metrics += len(metrics)
+
+                        stored_shares = {
+                            share.code: SummaryShare(
+                                share.code,
+                                share.display_name,
+                                share.share_class,
+                                share.currency,
+                                share.currency_form,
+                            )
+                            for share in session.scalars(
+                                select(FundShareClass).where(
+                                    FundShareClass.id.in_(share_ids.values())
+                                )
+                            )
+                        }
+                        detail_url = f"{EID_DETAIL_URL}?fundId={fund_id}"
+                        states, state_warnings = resolve_subscription_states(
+                            announcements,
+                            stored_shares,
+                            snapshot_date,
+                            detail_url,
+                        )
+                        warnings.extend(
+                            f"{candidate.code} {warning}"
+                            for warning in state_warnings
+                        )
+                        synced_subscription_states = 0
+                        for code, state in states.items():
+                            share_id = share_ids.get(code)
+                            if share_id is None:
+                                continue
+                            sync_subscription_state(
+                                session, share_id, state, collected_at
+                            )
+                            synced_subscription_states += 1
+
+                        rates_by_code: dict[
+                            str, tuple[dict[str, Decimal], str]
+                        ] = {}
+                        for document, summary in summaries:
+                            for code in summary.share_codes:
+                                rates_by_code.setdefault(
+                                    code, (summary.rates, document.url)
+                                )
+                        common_rates: (
+                            tuple[dict[str, Decimal], str] | None
+                        ) = None
+                        if summaries:
+                            document, summary = summaries[0]
+                            common_rates = (
+                                {
+                                    fee_type: rate
+                                    for fee_type, rate in summary.rates.items()
+                                    if fee_type in {"management", "custody"}
+                                },
+                                document.url,
+                            )
+                        synced_fee_shares = 0
+                        for code, share_id in share_ids.items():
+                            rate_source = rates_by_code.get(code) or common_rates
+                            if rate_source is None:
+                                continue
+                            rates, source_url = rate_source
+                            sync_fee_history(
+                                session,
+                                share_id,
+                                rates,
+                                collected_at,
+                                source_url,
+                            )
+                            synced_fee_shares += 1
+
+                        synced_scales = 0
+                        for scale_record in scale_records:
+                            share_id = share_ids.get(scale_record.share_code)
+                            if share_id is None:
+                                warnings.append(
+                                    f"{candidate.code}: quarterly scale share "
+                                    f"{scale_record.share_code} was not discovered"
+                                )
+                                continue
+                            assert scale_document is not None
+                            sync_scale_history(
+                                session,
+                                share_id,
+                                scale_record,
+                                collected_at,
+                                scale_document.url,
+                            )
+                            synced_scales += 1
+                    products += 1
+                    shares += len(share_ids)
+                    nav_rows += synced_nav
+                    fee_shares += synced_fee_shares
+                    scales += synced_scales
+                    subscription_states += synced_subscription_states
+                    return_metrics += synced_return_metrics
+                except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                    failures.append(f"{candidate.code} {candidate.name}: {exc}")
+            if products == 0:
+                session.rollback()
+                reason = "; ".join(failures[:3])
+                suffix = f": {reason}" if reason else ""
+                raise RuntimeError(f"CSRC script F synced no products{suffix}")
+            if dry_run:
+                session.rollback()
+            else:
+                session.commit()
+    return SyncStats(
+        products,
+        shares,
+        nav_rows,
+        fee_shares,
+        scales,
+        subscription_states,
+        tuple(failures),
+        tuple(warnings),
+        return_metrics,
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Sync target off-exchange funds and NAV from CSRC EID"
+        description="Script E: select target off-exchange funds from the CSRC catalog"
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="validate without committing"
@@ -542,12 +1946,20 @@ def main() -> None:
     parser.add_argument(
         "--limit", type=int, help="process only the first N candidates"
     )
+    parser.add_argument(
+        "--code",
+        action="append",
+        help="sync only this six-digit candidate code; may be repeated",
+    )
     args = parser.parse_args()
-    stats = run_sync(dry_run=args.dry_run, limit=args.limit)
+    stats = run_sync(
+        dry_run=args.dry_run, limit=args.limit, codes=tuple(args.code or ())
+    )
     action = "validated" if args.dry_run else "synced"
     print(
-        f"CSRC off-exchange funds {action}: {stats.products} products, "
-        f"{stats.shares} shares, {stats.nav_rows} NAV rows, "
+        f"CSRC off-exchange script E catalog {action}: "
+        f"{stats.products} products, {stats.shares} primary shares, "
+        f"snapshot {stats.snapshot_date.isoformat()}, "
         f"{len(stats.failures)} failures"
     )
     for failure in stats.failures:

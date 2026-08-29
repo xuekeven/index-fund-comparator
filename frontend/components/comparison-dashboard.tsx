@@ -2,28 +2,57 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { getComparison, getFunds, getIndices } from "@/lib/api";
+import { getComparison, getFunds, getIndices, updateFundTags } from "@/lib/api";
 import {
   keepAvailable,
   readFilterPreferences,
   writeFilterPreferences,
 } from "@/lib/filter-preferences";
 import {
+  calculateQdiiPurchaseLimits,
   EXCHANGES,
   filterFundRows,
+  latestTradingDataDate,
   sortFundRows,
+  SUBSCRIPTION_STATUS_OPTIONS,
   VENUES,
 } from "@/lib/fund-list";
 import type { FundSortKey, SortDirection, VenueFilter } from "@/lib/fund-list";
-import type { FundComparisonRow, IndexSummary } from "@/lib/types";
-import { CloseIcon, MarkIcon, RefreshIcon, SearchIcon } from "./icons";
+import type { FundComparisonRow, FundTag, IndexSummary } from "@/lib/types";
+import { CloseIcon, MarkIcon, SearchIcon } from "./icons";
 import { ComparisonView } from "./comparison-view";
 import { FundCards, FundTable } from "./fund-table";
+import { ShareClassHelpDialog } from "./share-class-help-dialog";
+import { SyncInfoDialog } from "./sync-info-dialog";
 
 type CachedFunds = {
   items: FundComparisonRow[];
   lastSyncedAt: Date | null;
 };
+
+const INDEX_ORDER: Record<string, number> = {
+  "sp-500": 0,
+  "nasdaq-100": 1,
+  "csi-500": 2,
+};
+const FUND_TAG_ORDER: FundTag[] = ["favorite", "holding", "recurring"];
+
+function replaceFundTags(
+  rows: FundComparisonRow[],
+  code: string,
+  tags: FundTag[],
+) {
+  return rows.map((fund) => fund.code === code ? { ...fund, tags } : fund);
+}
+
+function fundCacheKey(
+  indexId: string,
+  venue: VenueFilter,
+  exchanges: string[],
+) {
+  const exchangeKey = venue === "场内" ? [...exchanges].sort().join(",") : "";
+  return `${indexId}|${venue}|${exchangeKey}`;
+}
 
 function formatSyncTime(value: Date | null) {
   if (!value) return "尚未同步";
@@ -41,34 +70,32 @@ function formatTradeDate(value: string | null) {
   return value.slice(5).replace("-", "/");
 }
 
-interface MultiSelectFilterProps {
+function formatPurchaseLimit(value: number) {
+  return new Intl.NumberFormat("zh-CN", {
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+interface SingleSelectFilterProps {
   filterId: string;
   label: string;
   options: string[];
-  selected: string[];
+  selected: string | null;
   open: boolean;
-  allowClear?: boolean;
   onOpenChange: (open: boolean) => void;
-  onToggle: (value: string) => void;
-  onClear: () => void;
+  onSelect: (value: string | null) => void;
 }
 
-function MultiSelectFilter({
+function SingleSelectFilter({
   filterId,
   label,
   options,
   selected,
   open,
-  allowClear = true,
   onOpenChange,
-  onToggle,
-  onClear,
-}: MultiSelectFilterProps) {
-  const selectionLabel = selected.length === 0
-    ? allowClear ? "全部" : "未筛选"
-    : selected.length === 1
-      ? selected[0]
-      : `已选 ${selected.length} 项`;
+  onSelect,
+}: SingleSelectFilterProps) {
+  const selectionLabel = selected ?? "全部";
 
   return (
     <div className={`multi-filter ${open ? "open" : ""}`}>
@@ -84,28 +111,28 @@ function MultiSelectFilter({
       </button>
       {open && (
         <div className="multi-filter-menu" id={`${filterId}-menu`}>
-          {allowClear && (
+          <button
+            type="button"
+            className={selected === null ? "active" : ""}
+            onClick={() => {
+              onSelect(null);
+              onOpenChange(false);
+            }}
+          >
+            全部
+          </button>
+          {options.map((option) => (
             <button
+              key={option}
               type="button"
-              className={selected.length === 0 ? "active" : ""}
+              className={selected === option ? "active" : ""}
               onClick={() => {
-                onClear();
+                onSelect(option);
                 onOpenChange(false);
               }}
             >
-              全部
-            </button>
-          )}
-          {options.map((option) => (
-            <label key={option}>
-              <input
-                type="checkbox"
-                checked={selected.includes(option)}
-                onChange={() => onToggle(option)}
-              />
-              <span aria-hidden="true">{selected.includes(option) ? "✓" : ""}</span>
               {option}
-            </label>
+            </button>
           ))}
         </div>
       )}
@@ -121,6 +148,10 @@ export function ComparisonDashboard() {
   const [exchanges, setExchanges] = useState<string[]>(initialFilters.exchanges);
   const [shareClasses, setShareClasses] = useState<string[]>(initialFilters.shareClasses);
   const [currencies, setCurrencies] = useState<string[]>(initialFilters.currencies);
+  const [subscriptionStatuses, setSubscriptionStatuses] = useState<string[]>(
+    initialFilters.subscriptionStatuses,
+  );
+  const [taggedOnly, setTaggedOnly] = useState(initialFilters.taggedOnly);
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<FundSortKey | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -135,6 +166,10 @@ export function ComparisonDashboard() {
   const [comparisonWarnings, setComparisonWarnings] = useState<string[]>([]);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
+  const [syncInfoOpen, setSyncInfoOpen] = useState(false);
+  const [shareClassHelpOpen, setShareClassHelpOpen] = useState(false);
+  const [tagSavingCodes, setTagSavingCodes] = useState<string[]>([]);
+  const [tagError, setTagError] = useState<string | null>(null);
   const fundCache = useRef(new Map<string, CachedFunds>());
   const fundController = useRef<AbortController | null>(null);
   const fundRequestId = useRef(0);
@@ -142,21 +177,27 @@ export function ComparisonDashboard() {
 
   const loadIndices = useCallback(async (signal?: AbortSignal) => {
     const items = await getIndices(signal);
-    setIndices(items);
-    if (items.length) {
+    const orderedItems = [...items].sort(
+      (left, right) => (INDEX_ORDER[left.id] ?? 99) - (INDEX_ORDER[right.id] ?? 99),
+    );
+    setIndices(orderedItems);
+    if (orderedItems.length) {
       setActiveIndex((current) =>
-        items.some((item) => item.id === current) ? current : items[0].id,
+        orderedItems.some((item) => item.id === current) ? current : orderedItems[0].id,
       );
     }
   }, []);
 
   const loadFunds = useCallback(async (
     indexId: string,
+    selectedVenue: VenueFilter,
+    selectedExchanges: string[],
     signal?: AbortSignal,
     force = false,
   ) => {
     const requestId = ++fundRequestId.current;
-    const cached = fundCache.current.get(indexId);
+    const cacheKey = fundCacheKey(indexId, selectedVenue, selectedExchanges);
+    const cached = fundCache.current.get(cacheKey);
     if (cached && !force) {
       if (fundRequestId.current === requestId) {
         setFunds(cached.items);
@@ -167,11 +208,17 @@ export function ComparisonDashboard() {
       return;
     }
 
+    setLoading(true);
     setError(null);
     try {
-      const response = await getFunds(indexId, undefined, signal);
+      const response = await getFunds(
+        indexId,
+        selectedVenue,
+        selectedVenue === "场内" ? selectedExchanges : [],
+        signal,
+      );
       const syncedAt = response.lastSyncedAt ? new Date(response.lastSyncedAt) : null;
-      fundCache.current.set(indexId, {
+      fundCache.current.set(cacheKey, {
         items: response.items,
         lastSyncedAt: syncedAt,
       });
@@ -210,12 +257,12 @@ export function ComparisonDashboard() {
     const controller = new AbortController();
     fundController.current?.abort();
     fundController.current = controller;
-    queueMicrotask(() => loadFunds(activeIndex, controller.signal));
+    queueMicrotask(() => loadFunds(activeIndex, venue, exchanges, controller.signal));
     return () => {
       controller.abort();
       if (fundController.current === controller) fundController.current = null;
     };
-  }, [activeIndex, loadFunds]);
+  }, [activeIndex, exchanges, loadFunds, venue]);
   useEffect(() => {
     writeFilterPreferences({
       activeIndex,
@@ -223,8 +270,10 @@ export function ComparisonDashboard() {
       exchanges,
       shareClasses,
       currencies,
+      subscriptionStatuses,
+      taggedOnly,
     });
-  }, [activeIndex, currencies, exchanges, shareClasses, venue]);
+  }, [activeIndex, currencies, exchanges, shareClasses, subscriptionStatuses, taggedOnly, venue]);
 
 
   useEffect(() => () => {
@@ -274,18 +323,27 @@ export function ComparisonDashboard() {
   }, [currencyOptions, funds.length, shareClassOptions, venue]);
 
   const visibleFunds = useMemo(
-    () => filterFundRows(funds, { venue, exchanges, shareClasses, currencies, query }),
-    [currencies, exchanges, funds, query, shareClasses, venue],
+    () => filterFundRows(funds, {
+      venue,
+      exchanges,
+      shareClasses,
+      currencies,
+      subscriptionStatuses,
+      taggedOnly,
+      query,
+    }),
+    [currencies, exchanges, funds, query, shareClasses, subscriptionStatuses, taggedOnly, venue],
   );
 
-  const tradeDate = useMemo(() => {
-    const dates = visibleFunds.flatMap((fund) =>
-      [fund.closeDate, fund.navDate, fund.scaleDate].filter(
-        (value): value is string => value !== null,
-      ),
-    );
-    return dates.length > 0 ? dates.sort().at(-1) ?? null : null;
-  }, [visibleFunds]);
+  const tradeDate = useMemo(
+    () => latestTradingDataDate(visibleFunds),
+    [visibleFunds],
+  );
+
+  const qdiiPurchaseLimits = useMemo(
+    () => calculateQdiiPurchaseLimits(visibleFunds),
+    [visibleFunds],
+  );
 
   const sortedFunds = useMemo(
     () => sortFundRows(visibleFunds, sortKey, sortDirection),
@@ -299,7 +357,9 @@ export function ComparisonDashboard() {
 
   function changeIndex(indexId: string) {
     if (indexId === activeIndex) return;
-    const cached = fundCache.current.get(indexId);
+    const cached = fundCache.current.get(
+      fundCacheKey(indexId, "场内", []),
+    );
     setLoading(!cached);
     if (cached) {
       setFunds(cached.items);
@@ -307,9 +367,11 @@ export function ComparisonDashboard() {
     }
     setActiveIndex(indexId);
     setVenue("场内");
-    setExchanges([...EXCHANGES]);
+    setExchanges([]);
     setShareClasses([]);
     setCurrencies([]);
+    setSubscriptionStatuses([]);
+    setTaggedOnly(false);
     setOpenFilter(null);
     setSelected([]);
     setQuery("");
@@ -318,10 +380,11 @@ export function ComparisonDashboard() {
   function changeVenue(nextVenue: VenueFilter) {
     setVenue(nextVenue);
     setOpenFilter(null);
-    setExchanges(nextVenue === "场内" ? [...EXCHANGES] : []);
+    setExchanges([]);
     if (nextVenue !== "场外") {
       setShareClasses([]);
       setCurrencies([]);
+      setSubscriptionStatuses([]);
     }
   }
 
@@ -334,21 +397,6 @@ export function ComparisonDashboard() {
     setSortDirection("asc");
   }
 
-  function toggleValue(
-    value: string,
-    setter: React.Dispatch<React.SetStateAction<string[]>>,
-  ) {
-    setter((current) => (
-      current.includes(value)
-        ? current.filter((item) => item !== value)
-        : [...current, value]
-    ));
-  }
-
-  function toggleExchange(value: string) {
-    toggleValue(value, setExchanges);
-  }
-
   function toggleFund(code: string) {
     setSelected((current) => {
       if (current.includes(code)) return current.filter((item) => item !== code);
@@ -357,16 +405,49 @@ export function ComparisonDashboard() {
     });
   }
 
+  function applyFundTags(code: string, tags: FundTag[]) {
+    setFunds((current) => replaceFundTags(current, code, tags));
+    setComparisonFunds((current) => replaceFundTags(current, code, tags));
+    fundCache.current.forEach((cached, key) => {
+      fundCache.current.set(key, {
+        ...cached,
+        items: replaceFundTags(cached.items, code, tags),
+      });
+    });
+  }
+
+  async function saveFundTags(code: string, tags: FundTag[]) {
+    const fund = funds.find((item) => item.code === code);
+    if (!fund || tagSavingCodes.includes(code)) return false;
+
+    const previousTags = fund.tags;
+    const nextTags = FUND_TAG_ORDER.filter((item) => tags.includes(item));
+    setTagError(null);
+    setTagSavingCodes((current) => [...current, code]);
+    applyFundTags(code, nextTags);
+    try {
+      const response = await updateFundTags(code, nextTags);
+      applyFundTags(code, response.tags);
+      return true;
+    } catch {
+      applyFundTags(code, previousTags);
+      setTagError(`${code} 的标签保存失败，请稍后重试。`);
+      return false;
+    } finally {
+      setTagSavingCodes((current) => current.filter((item) => item !== code));
+    }
+  }
+
   async function refresh() {
     setLoading(true);
-    fundCache.current.delete(activeIndex);
+    fundCache.current.delete(fundCacheKey(activeIndex, venue, exchanges));
     fundController.current?.abort();
     const controller = new AbortController();
     fundController.current = controller;
     try {
       await Promise.all([
         loadIndices(controller.signal),
-        loadFunds(activeIndex, controller.signal, true),
+        loadFunds(activeIndex, venue, exchanges, controller.signal, true),
       ]);
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === "AbortError") return;
@@ -404,6 +485,9 @@ export function ComparisonDashboard() {
     setComparisonOpen(false);
   }, []);
 
+  const closeSyncInfo = useCallback(() => setSyncInfoOpen(false), []);
+  const closeShareClassHelp = useCallback(() => setShareClassHelpOpen(false), []);
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -415,8 +499,14 @@ export function ComparisonDashboard() {
           </span>
         </a>
         <div className="topbar-actions">
-          <button className="icon-button" type="button" onClick={refresh} aria-label="刷新数据">
-            <RefreshIcon />
+          <button
+            className="topbar-info-button"
+            type="button"
+            onClick={() => setSyncInfoOpen(true)}
+            aria-label="查看数据同步机制"
+            title="数据同步机制"
+          >
+            数据同步机制
           </button>
         </div>
       </header>
@@ -461,42 +551,56 @@ export function ComparisonDashboard() {
                 ))}
               </div>
               {venue === "场内" && (
-                <MultiSelectFilter
+                <SingleSelectFilter
                   filterId="exchange-filter"
                   label="交易所"
                   options={EXCHANGES}
-                  selected={exchanges}
+                  selected={exchanges[0] ?? null}
                   open={openFilter === "exchange"}
-                  allowClear={false}
                   onOpenChange={(open) => setOpenFilter(open ? "exchange" : null)}
-                  onToggle={toggleExchange}
-                  onClear={() => setExchanges([])}
+                  onSelect={(value) => setExchanges(value ? [value] : [])}
                 />
               )}
               {venue === "场外" && (
                 <>
-                  <MultiSelectFilter
+                  <SingleSelectFilter
                     filterId="share-class-filter"
                     label="份额类别"
                     options={shareClassOptions}
-                    selected={shareClasses}
+                    selected={shareClasses[0] ?? null}
                     open={openFilter === "share-class"}
                     onOpenChange={(open) => setOpenFilter(open ? "share-class" : null)}
-                    onToggle={(value) => toggleValue(value, setShareClasses)}
-                    onClear={() => setShareClasses([])}
+                    onSelect={(value) => setShareClasses(value ? [value] : [])}
                   />
-                  <MultiSelectFilter
+                  <SingleSelectFilter
+                    filterId="subscription-filter"
+                    label="申购"
+                    options={SUBSCRIPTION_STATUS_OPTIONS}
+                    selected={subscriptionStatuses[0] ?? null}
+                    open={openFilter === "subscription"}
+                    onOpenChange={(open) => setOpenFilter(open ? "subscription" : null)}
+                    onSelect={(value) => setSubscriptionStatuses(value ? [value] : [])}
+                  />
+                  <SingleSelectFilter
                     filterId="currency-filter"
                     label="币种"
                     options={currencyOptions}
-                    selected={currencies}
+                    selected={currencies[0] ?? null}
                     open={openFilter === "currency"}
                     onOpenChange={(open) => setOpenFilter(open ? "currency" : null)}
-                    onToggle={(value) => toggleValue(value, setCurrencies)}
-                    onClear={() => setCurrencies([])}
+                    onSelect={(value) => setCurrencies(value ? [value] : [])}
                   />
                 </>
               )}
+              <label className={`tag-filter-checkbox ${taggedOnly ? "active" : ""}`}>
+                <span>标签</span>
+                <input
+                  type="checkbox"
+                  checked={taggedOnly}
+                  onChange={(event) => setTaggedOnly(event.target.checked)}
+                />
+                <i aria-hidden="true">{taggedOnly ? "✓" : ""}</i>
+              </label>
             </div>
             <label className="search-box">
               <SearchIcon />
@@ -529,8 +633,21 @@ export function ComparisonDashboard() {
                 <span>交易日</span>
                 <strong>{formatTradeDate(tradeDate)}</strong>
               </p>
+              {venue === "场外" && qdiiPurchaseLimits.hasQdii && (
+                <p className="fund-purchase-limit">
+                  <span className="status-dot" />
+                  <span className="fund-purchase-limit-copy">
+                    <span>共可购买</span>
+                    <strong>{formatPurchaseLimit(qdiiPurchaseLimits.cny)}</strong>
+                    <span>人民币</span>
+                    <strong>{formatPurchaseLimit(qdiiPurchaseLimits.usd)}</strong>
+                    <span>美元</span>
+                  </span>
+                </p>
+              )}
             </div>
           )}
+          {tagError && <p className="tag-save-error" role="alert">{tagError}</p>}
 
           {error ? (
             <div className="state-panel error-state">
@@ -554,16 +671,26 @@ export function ComparisonDashboard() {
                 funds={sortedFunds}
                 selected={selected}
                 onToggle={toggleFund}
+                onTagsSave={saveFundTags}
+                tagSavingCodes={tagSavingCodes}
                 sortKey={sortKey}
                 sortDirection={sortDirection}
                 onSort={changeSort}
+                onOpenShareClassHelp={() => setShareClassHelpOpen(true)}
               />
-              <FundCards funds={sortedFunds} selected={selected} onToggle={toggleFund} />
+              <FundCards
+                funds={sortedFunds}
+                selected={selected}
+                onToggle={toggleFund}
+                onTagsSave={saveFundTags}
+                tagSavingCodes={tagSavingCodes}
+                onOpenShareClassHelp={() => setShareClassHelpOpen(true)}
+              />
             </>
           )}
 
           <p className="table-footnote">
-            “偏离”使用最新净值日对应的同日收盘价，按“收盘价 ÷ 单位净值 − 1”计算。
+            “偏离”：QDII 使用最新中国交易日收盘价与最新可得境外净值计算；其他基金使用净值日对应的同日收盘价。公式均为“收盘价 ÷ 单位净值 − 1”。
           </p>
         </section>
       </main>
@@ -597,6 +724,10 @@ export function ComparisonDashboard() {
           onClose={closeComparison}
           onRetry={startComparison}
         />
+      )}
+      {syncInfoOpen && <SyncInfoDialog onClose={closeSyncInfo} />}
+      {shareClassHelpOpen && (
+        <ShareClassHelpDialog onClose={closeShareClassHelp} />
       )}
     </div>
   );

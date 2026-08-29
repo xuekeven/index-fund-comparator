@@ -38,6 +38,12 @@ class DataStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class FundTagType(str, Enum):
+    FAVORITE = "favorite"
+    HOLDING = "holding"
+    RECURRING = "recurring"
+
+
 class HealthResponse(ApiModel):
     status: str
     version: str
@@ -78,6 +84,9 @@ class FundComparisonRow(ApiModel):
     exact_benchmark: str
     share_class: str | None = None
     currency: str = "人民币"
+    subscription_status: str | None = None
+    subscription_limit_amount: float | None = None
+    subscription_limit_currency: str | None = None
     exchange: str | None = None
     management_fee: float | None = None
     custody_fee: float | None = None
@@ -96,6 +105,16 @@ class FundComparisonRow(ApiModel):
     source_url: str | None = None
     source_time: datetime | None = None
     note: str | None = None
+    tags: list[FundTagType] = Field(default_factory=list)
+
+
+class FundTagUpdate(ApiModel):
+    tags: list[FundTagType] = Field(default_factory=list, max_length=3)
+
+
+class FundTagResponse(ApiModel):
+    fund_code: str
+    tags: list[FundTagType]
 
 
 class FundListResponse(ApiModel):

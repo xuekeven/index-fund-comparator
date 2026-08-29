@@ -1,33 +1,36 @@
 import argparse
 import html
-import io
 import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 import httpx
-from pypdf import PdfReader
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.database import get_session_factory
-from app.database_models import FeeHistory, FundListing, FundProduct, FundShareClass, IndexDefinition
+from app.database_models import FundListing, FundProduct, FundShareClass, IndexDefinition
 from app.sync.csrc_funds import EID_DETAIL_URL, validate_fund_code
+from app.sync.eid_disclosures import (
+    PRODUCT_SUMMARY_LABEL,
+    disclosure_documents,
+    extract_pdf_text,
+    parse_fee_rates as parse_disclosure_fee_rates,
+    sync_fee_history,
+)
 from app.sync.sse_funds import ensure_index_master_data
 
 
 SZSE_REPORT_URL = "https://www.szse.cn/api/report/ShowReport/data"
 SZSE_SOURCE_URL = "https://www.szse.cn/www/market/product/list/etfList/index.html"
 SZSE_ETF_CATALOG_ID = "1945"
-SZSE_SEARCH_TERMS = ("中证500", "标普500", "纳指", "纳斯达克100")
+SZSE_SEARCH_TERMS = ("中证500", "标普500", "纳指", "纳斯达克", "纳斯达克100")
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
-PRODUCT_SUMMARY_LABEL = "基金产品资料概要"
 logger = logging.getLogger(__name__)
 
 
@@ -80,31 +83,16 @@ def clean_report_value(value: Any) -> str:
 
 
 def product_summary_url(detail_html: str) -> str | None:
-    matches = re.findall(
-        r'href=["\']([^"\']*instance_show_pdf_id\.do\?instanceid=\d+)["\'][^>]*>(.*?)</a>',
+    documents = disclosure_documents(
         detail_html,
-        flags=re.IGNORECASE | re.DOTALL,
+        PRODUCT_SUMMARY_LABEL,
+        base_url=EID_DETAIL_URL,
     )
-    for href, raw_title in matches:
-        title = clean_report_value(raw_title)
-        if PRODUCT_SUMMARY_LABEL in title:
-            return urljoin(EID_DETAIL_URL, href)
-    return None
+    return documents[0].url if documents else None
 
 
 def parse_fee_rates(pdf_content: bytes) -> dict[str, Decimal]:
-    reader = PdfReader(io.BytesIO(pdf_content))
-    text = " ".join((page.extract_text() or "") for page in reader.pages)
-    compact = re.sub(r"\s+", "", text)
-    labels = {"management": "管理费", "custody": "托管费"}
-    rates: dict[str, Decimal] = {}
-    for fee_type, label in labels.items():
-        match = re.search(rf"{label}.{{0,24}}?([0-9]+(?:\.[0-9]+)?)%", compact)
-        if match:
-            rates[fee_type] = Decimal(match.group(1))
-    if set(rates) != set(labels):
-        raise RuntimeError("Fund product summary did not contain management and custody rates")
-    return rates
+    return parse_disclosure_fee_rates(extract_pdf_text(pdf_content))
 
 
 def fetch_fee_rates(client: httpx.Client, ticker: str) -> tuple[dict[str, Decimal], str]:
@@ -117,51 +105,6 @@ def fetch_fee_rates(client: httpx.Client, ticker: str) -> tuple[dict[str, Decima
     summary_response = client.get(summary_url)
     summary_response.raise_for_status()
     return parse_fee_rates(summary_response.content), summary_url
-
-
-def sync_fee_history(
-    session: Session,
-    share_id: int,
-    rates: dict[str, Decimal],
-    collected_at: datetime,
-    source_url: str,
-) -> None:
-    for fee_type, rate in rates.items():
-        current = session.scalar(
-            select(FeeHistory)
-            .where(
-                FeeHistory.fund_share_class_id == share_id,
-                FeeHistory.fee_type == fee_type,
-                FeeHistory.effective_to.is_(None),
-            )
-            .order_by(
-                FeeHistory.effective_from.desc().nullslast(),
-                FeeHistory.id.desc(),
-            )
-            .limit(1)
-        )
-        if current is not None and current.rate == rate:
-            current.source_url = source_url
-            current.source_time = collected_at
-            current.collected_at = collected_at
-            current.quality_status = "verified"
-            continue
-        if current is not None:
-            current.effective_to = collected_at
-        session.add(
-            FeeHistory(
-                fund_share_class_id=share_id,
-                fee_type=fee_type,
-                rate=rate,
-                rate_unit="percent",
-                tier_description="证监会基金产品资料概要当前费率；文件未提供原始生效日期",
-                effective_from=collected_at,
-                source_url=source_url,
-                source_time=collected_at,
-                collected_at=collected_at,
-                quality_status="verified",
-            )
-        )
 
 
 def sync_target_fees(

@@ -2,6 +2,7 @@ import type { FundComparisonRow, TradingVenue } from "./types";
 
 export type FundSortKey =
   | "code"
+  | "name"
   | "expenseRate"
   | "scale"
   | "return1m"
@@ -13,13 +14,22 @@ export type SortDirection = "asc" | "desc";
 export type VenueFilter = TradingVenue;
 
 export const VENUES: VenueFilter[] = ["场内", "场外"];
-export const EXCHANGES = ["深交所", "上交所"];
+export const EXCHANGES = ["上交所", "深交所"];
+export const SUBSCRIPTION_STATUS_OPTIONS = ["开放", "暂停", "限额"];
+
+const SUBSCRIPTION_STATUS_BY_LABEL: Record<string, FundComparisonRow["subscriptionStatus"]> = {
+  开放: "open",
+  暂停: "suspended",
+  限额: "limited",
+};
 
 export interface FundFilters {
   venue: VenueFilter;
   exchanges: string[];
   shareClasses: string[];
   currencies: string[];
+  subscriptionStatuses: string[];
+  taggedOnly: boolean;
   query: string;
 }
 
@@ -58,11 +68,55 @@ export function filterFundRows(funds: FundComparisonRow[], filters: FundFilters)
     if (filters.currencies.length > 0 && !filters.currencies.includes(fund.currency)) {
       return false;
     }
+    if (
+      filters.subscriptionStatuses.length > 0
+      && !filters.subscriptionStatuses.some(
+        (label) => SUBSCRIPTION_STATUS_BY_LABEL[label] === fund.subscriptionStatus,
+      )
+    ) {
+      return false;
+    }
+    if (filters.taggedOnly && fund.tags.length === 0) {
+      return false;
+    }
     if (!normalized) return true;
     return [fund.code, fund.displayName, fund.fundCompany].some((value) =>
       value.toLocaleLowerCase().includes(normalized),
     );
   });
+}
+
+export function latestTradingDataDate(funds: FundComparisonRow[]) {
+  const dates = funds.flatMap((fund) =>
+    [fund.closeDate, fund.navDate].filter(
+      (value): value is string => value !== null,
+    ),
+  );
+  return dates.reduce<string | null>(
+    (latest, value) => latest === null || value > latest ? value : latest,
+    null,
+  );
+}
+
+export function calculateQdiiPurchaseLimits(funds: FundComparisonRow[]) {
+  let hasQdii = false;
+  let cny = 0;
+  let usd = 0;
+
+  for (const fund of funds) {
+    if (fund.tradingVenue !== "场外" || !fund.investmentScope.includes("QDII")) {
+      continue;
+    }
+    hasQdii = true;
+    if (fund.subscriptionStatus !== "limited" || fund.subscriptionLimitAmount === null) {
+      continue;
+    }
+    const currency = fund.subscriptionLimitCurrency ?? fund.currency;
+    if (currency === "美元") usd += fund.subscriptionLimitAmount;
+    if (currency === "人民币") cny += fund.subscriptionLimitAmount;
+  }
+
+  return { hasQdii, cny, usd };
 }
 
 export function sortFundRows(
@@ -76,10 +130,13 @@ export function sortFundRows(
     .sort((leftItem, rightItem) => {
       const { fund: left } = leftItem;
       const { fund: right } = rightItem;
-      if (sortKey === "code") {
-        const comparison = left.code.localeCompare(right.code, "zh-CN", { numeric: true });
+      if (sortKey === "code" || sortKey === "name") {
+        const leftText = sortKey === "code" ? left.code : left.displayName;
+        const rightText = sortKey === "code" ? right.code : right.displayName;
+        const comparison = leftText.localeCompare(rightText, "zh-CN", { numeric: true });
+        const tieBreaker = left.code.localeCompare(right.code, "zh-CN", { numeric: true });
         return comparison === 0
-          ? leftItem.originalIndex - rightItem.originalIndex
+          ? tieBreaker === 0 ? leftItem.originalIndex - rightItem.originalIndex : tieBreaker
           : sortDirection === "asc" ? comparison : -comparison;
       }
       const leftValue = fundSortValue(left, sortKey);

@@ -177,7 +177,7 @@ export function ComparisonView({
                   ))}
                 </tr>
                 <tr>
-                  <th>同日偏离</th>
+                  <th>偏离</th>
                   {funds.map((fund) => (
                     <td key={fund.id}>
                       <Value muted={fund.estimatedDeviation === null}>{formatPercent(fund.estimatedDeviation, true)}</Value>
@@ -194,7 +194,7 @@ export function ComparisonView({
                   ))}
                 </tr>
                 <tr>
-                  <th>基金规模</th>
+                  <th>规模</th>
                   {funds.map((fund) => (
                     <td key={fund.id}>
                       <Value>{fund.scaleBillionCny === null ? "—" : `${fund.scaleBillionCny.toFixed(2)} 亿元`}</Value>

@@ -198,6 +198,32 @@ class FundShareClass(Base, TimestampMixin, ProvenanceMixin):
     )
 
 
+class UserFundTag(Base, TimestampMixin):
+    __tablename__ = "user_fund_tag"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    fund_share_class_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("fund_share_class.id", ondelete="CASCADE"), nullable=False
+    )
+    tag_type: Mapped[str] = mapped_column(String(24), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "tag_type IN ('favorite', 'holding', 'recurring')",
+            name="ck_user_fund_tag_type",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "fund_share_class_id",
+            "tag_type",
+            name="uq_user_fund_tag_identity",
+        ),
+        Index("ix_user_fund_tag_user", "user_id"),
+        Index("ix_user_fund_tag_share", "fund_share_class_id"),
+    )
+
+
 class FundListing(Base, TimestampMixin, ProvenanceMixin):
     __tablename__ = "fund_listing"
 

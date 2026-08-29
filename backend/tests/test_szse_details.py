@@ -62,7 +62,7 @@ def test_eid_nav_query_and_parser_use_exact_etf_code() -> None:
     ]
 
 
-def test_merge_nav_and_scale_use_latest_official_nav_on_or_before_date() -> None:
+def test_merge_nav_uses_newest_date_from_either_official_source() -> None:
     eid = [
         szse_details.SseNavRecord("159513", date(2026, 8, 19), Decimal("1.66")),
         szse_details.SseNavRecord("159513", date(2026, 8, 20), Decimal("1.67")),
@@ -73,9 +73,22 @@ def test_merge_nav_and_scale_use_latest_official_nav_on_or_before_date() -> None
     records = szse_details.merge_nav_records(eid, szse)
 
     assert records[0].unit_nav == Decimal("1.6625")
+    assert records[-1].nav_date == date(2026, 8, 20)
+    assert records[-1].unit_nav == Decimal("1.67")
     assert szse_details.latest_nav_on_or_before(
         records, date(2026, 8, 21)
     ) == Decimal("1.67")
+
+    newer_szse = szse_details.merge_nav_records(
+        eid,
+        [
+            szse_details.SseNavRecord(
+                "159513", date(2026, 8, 21), Decimal("1.68")
+            )
+        ],
+    )
+    assert newer_szse[-1].nav_date == date(2026, 8, 21)
+    assert newer_szse[-1].unit_nav == Decimal("1.68")
 
 
 def test_estimated_scale_uses_official_share_count_and_same_day_nav() -> None:

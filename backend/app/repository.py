@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import Select, and_, case, func, or_, select, union_all
+from sqlalchemy import Select, and_, case, delete, func, or_, select, union_all
 from sqlalchemy.orm import Session, aliased
 
 from app.config import get_settings
@@ -20,9 +20,18 @@ from app.database_models import (
     IndexFamily,
     MarketQuote,
     NavDaily,
+    SalesLimitHistory,
     SourceDocument,
+    UserFundTag,
 )
-from app.models import DataStatus, FundComparisonRow, IndexSummary, MetricValue, NavPoint
+from app.models import (
+    DataStatus,
+    FundComparisonRow,
+    FundTagType,
+    IndexSummary,
+    MetricValue,
+    NavPoint,
+)
 
 
 RETURN_PERIOD_LABELS = {
@@ -32,14 +41,22 @@ RETURN_PERIOD_LABELS = {
     "return_ytd": "今年来",
     "return_1y": "1年",
 }
+SINGLE_USER_ID = "default"
+FUND_TAG_ORDER = {
+    FundTagType.FAVORITE: 0,
+    FundTagType.HOLDING: 1,
+    FundTagType.RECURRING: 2,
+}
 
 
 def calculate_operating_rate(
-    management_fee: float | None, custody_fee: float | None
+    management_fee: float | None,
+    custody_fee: float | None,
+    sales_service_fee: float | None = None,
 ) -> float | None:
     if management_fee is None or custody_fee is None:
         return None
-    return management_fee + custody_fee
+    return management_fee + custody_fee + (sales_service_fee or 0)
 
 
 def calculate_estimated_deviation(
@@ -47,13 +64,21 @@ def calculate_estimated_deviation(
     close_date: date | None,
     nav: float | None,
     nav_date: date | None,
+    *,
+    allow_lagged_nav: bool = False,
 ) -> float | None:
+    next_weekday = nav_date + timedelta(days=1) if nav_date is not None else None
+    while next_weekday is not None and next_weekday.weekday() >= 5:
+        next_weekday += timedelta(days=1)
     if (
         close_price is None
         or nav in (None, 0)
         or close_date is None
         or nav_date is None
-        or close_date != nav_date
+        or (
+            close_date != nav_date
+            and not (allow_lagged_nav and close_date == next_weekday)
+        )
     ):
         return None
     return round((close_price / nav - 1) * 100, 4)
@@ -67,7 +92,12 @@ class FundRepository(ABC):
     def get_index(self, index_id: str) -> IndexSummary | None: ...
 
     @abstractmethod
-    def get_last_synced_at(self, index_id: str) -> datetime | None: ...
+    def get_last_synced_at(
+        self,
+        index_id: str,
+        venue: str | None = None,
+        exchanges: tuple[str, ...] = (),
+    ) -> datetime | None: ...
 
     @abstractmethod
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]: ...
@@ -77,6 +107,11 @@ class FundRepository(ABC):
 
     @abstractmethod
     def get_funds(self, codes: list[str]) -> list[FundComparisonRow]: ...
+
+    @abstractmethod
+    def set_fund_tags(
+        self, code: str, tags: list[FundTagType]
+    ) -> list[FundTagType] | None: ...
 
     @abstractmethod
     def get_nav(
@@ -108,7 +143,12 @@ class SampleFundRepository(FundRepository):
     def get_index(self, index_id: str) -> IndexSummary | None:
         return next((item for item in self._indices if item.id == index_id), None)
 
-    def get_last_synced_at(self, index_id: str) -> datetime | None:
+    def get_last_synced_at(
+        self,
+        index_id: str,
+        venue: str | None = None,
+        exchanges: tuple[str, ...] = (),
+    ) -> datetime | None:
         return None
 
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]:
@@ -122,6 +162,17 @@ class SampleFundRepository(FundRepository):
     def get_funds(self, codes: list[str]) -> list[FundComparisonRow]:
         funds_by_code = {fund.code: fund for fund in self._funds}
         return [funds_by_code[code] for code in codes if code in funds_by_code]
+
+    def set_fund_tags(
+        self, code: str, tags: list[FundTagType]
+    ) -> list[FundTagType] | None:
+        normalized = sorted(set(tags), key=FUND_TAG_ORDER.__getitem__)
+        for index, fund in enumerate(self._funds):
+            if fund.code != code:
+                continue
+            self._funds[index] = fund.model_copy(update={"tags": normalized})
+            return normalized
+        return None
 
     def get_nav(
         self,
@@ -223,52 +274,63 @@ class PostgresFundRepository(FundRepository):
             family, count = row
             return self._index_summary(family, count or 0)
 
-    def get_last_synced_at(self, index_id: str) -> datetime | None:
+    def get_last_synced_at(
+        self,
+        index_id: str,
+        venue: str | None = None,
+        exchanges: tuple[str, ...] = (),
+    ) -> datetime | None:
+        product_ids = (
+            select(FundProduct.id)
+            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
+            .where(IndexDefinition.family_id == index_id)
+        )
+        if venue:
+            product_ids = product_ids.where(FundProduct.trading_venue == f"仅{venue}")
+        if exchanges:
+            product_ids = (
+                product_ids
+                .join(FundShareClass, FundShareClass.fund_product_id == FundProduct.id)
+                .join(FundListing, FundListing.fund_share_class_id == FundShareClass.id)
+                .where(FundListing.exchange.in_(exchanges))
+            )
+        product_ids = product_ids.distinct()
+
         statements = (
             select(func.max(FundProduct.collected_at).label("collected_at"))
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+            .where(FundProduct.id.in_(product_ids)),
             select(func.max(FundShareClass.collected_at).label("collected_at"))
-            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+            .where(FundShareClass.fund_product_id.in_(product_ids)),
             select(func.max(FundListing.collected_at).label("collected_at"))
             .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
-            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+            .where(FundShareClass.fund_product_id.in_(product_ids)),
             select(func.max(NavDaily.collected_at).label("collected_at"))
             .join(FundShareClass, NavDaily.fund_share_class_id == FundShareClass.id)
-            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+            .where(FundShareClass.fund_product_id.in_(product_ids)),
             select(func.max(MarketQuote.collected_at).label("collected_at"))
             .join(FundListing, MarketQuote.fund_listing_id == FundListing.id)
             .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
-            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+            .where(FundShareClass.fund_product_id.in_(product_ids)),
             select(func.max(FundScale.collected_at).label("collected_at"))
             .outerjoin(FundShareClass, FundScale.fund_share_class_id == FundShareClass.id)
-            .join(
-                FundProduct,
+            .where(
                 or_(
-                    FundScale.fund_product_id == FundProduct.id,
-                    FundShareClass.fund_product_id == FundProduct.id,
-                ),
-            )
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+                    FundScale.fund_product_id.in_(product_ids),
+                    FundShareClass.fund_product_id.in_(product_ids),
+                )
+            ),
             select(func.max(FeeHistory.collected_at).label("collected_at"))
             .join(FundShareClass, FeeHistory.fund_share_class_id == FundShareClass.id)
-            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+            .where(FundShareClass.fund_product_id.in_(product_ids)),
             select(func.max(CalculatedMetric.collected_at).label("collected_at"))
             .join(FundShareClass, CalculatedMetric.fund_share_class_id == FundShareClass.id)
-            .join(FundProduct, FundShareClass.fund_product_id == FundProduct.id)
-            .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
-            .where(IndexDefinition.family_id == index_id),
+            .where(FundShareClass.fund_product_id.in_(product_ids)),
+            select(func.max(SalesLimitHistory.collected_at).label("collected_at"))
+            .join(
+                FundShareClass,
+                SalesLimitHistory.fund_share_class_id == FundShareClass.id,
+            )
+            .where(FundShareClass.fund_product_id.in_(product_ids)),
         )
         sync_times = union_all(*statements).subquery()
         with self._session_factory() as session:
@@ -284,11 +346,15 @@ class PostgresFundRepository(FundRepository):
             fees_by_share, metrics_by_share = self._load_fund_details(
                 session, [row["share_id"] for row in row_dicts]
             )
+            tags_by_share = self._load_user_tags(
+                session, [row["share_id"] for row in row_dicts]
+            )
             return [
                 self._fund_row(
                     row,
                     fees_by_share.get(row["share_id"], {}),
                     metrics_by_share.get(row["share_id"], {}),
+                    tags_by_share.get(row["share_id"], []),
                 )
                 for row in row_dicts
             ]
@@ -310,15 +376,55 @@ class PostgresFundRepository(FundRepository):
             fees_by_share, metrics_by_share = self._load_fund_details(
                 session, [row["share_id"] for row in row_dicts]
             )
+            tags_by_share = self._load_user_tags(
+                session, [row["share_id"] for row in row_dicts]
+            )
             funds_by_code = {
                 row["ticker"] or row["code"]: self._fund_row(
                     row,
                     fees_by_share.get(row["share_id"], {}),
                     metrics_by_share.get(row["share_id"], {}),
+                    tags_by_share.get(row["share_id"], []),
                 )
                 for row in row_dicts
             }
             return [funds_by_code[code] for code in codes if code in funds_by_code]
+
+    def set_fund_tags(
+        self, code: str, tags: list[FundTagType]
+    ) -> list[FundTagType] | None:
+        normalized = sorted(set(tags), key=FUND_TAG_ORDER.__getitem__)
+        with self._session_factory() as session:
+            share_id = session.scalar(
+                select(FundShareClass.id)
+                .outerjoin(
+                    FundListing,
+                    FundListing.fund_share_class_id == FundShareClass.id,
+                )
+                .where(
+                    or_(FundShareClass.code == code, FundListing.ticker == code),
+                    FundShareClass.status == "active",
+                )
+            )
+            if share_id is None:
+                return None
+
+            session.execute(
+                delete(UserFundTag).where(
+                    UserFundTag.user_id == SINGLE_USER_ID,
+                    UserFundTag.fund_share_class_id == share_id,
+                )
+            )
+            session.add_all(
+                UserFundTag(
+                    user_id=SINGLE_USER_ID,
+                    fund_share_class_id=share_id,
+                    tag_type=tag.value,
+                )
+                for tag in normalized
+            )
+            session.commit()
+            return normalized
 
     def get_nav(
         self,
@@ -389,6 +495,7 @@ class PostgresFundRepository(FundRepository):
         latest_quote = aliased(MarketQuote)
         same_day_quote = aliased(MarketQuote)
         latest_scale = aliased(FundScale)
+        latest_subscription = aliased(SalesLimitHistory)
         source = aliased(SourceDocument)
 
         latest_nav_id = self._latest_id_subquery(
@@ -426,6 +533,27 @@ class PostgresFundRepository(FundRepository):
             .limit(1)
             .correlate(FundShareClass, FundProduct)
         )
+        latest_subscription_id = (
+            select(SalesLimitHistory.id)
+            .where(
+                SalesLimitHistory.fund_share_class_id == FundShareClass.id,
+                SalesLimitHistory.business_type == "申购",
+                or_(
+                    SalesLimitHistory.effective_from.is_(None),
+                    SalesLimitHistory.effective_from <= func.now(),
+                ),
+                or_(
+                    SalesLimitHistory.effective_to.is_(None),
+                    SalesLimitHistory.effective_to > func.now(),
+                ),
+            )
+            .order_by(
+                SalesLimitHistory.effective_from.desc().nullslast(),
+                SalesLimitHistory.id.desc(),
+            )
+            .limit(1)
+            .correlate(FundShareClass)
+        )
 
         return (
             select(
@@ -434,6 +562,9 @@ class PostgresFundRepository(FundRepository):
                 FundShareClass.display_name,
                 FundShareClass.share_class,
                 FundShareClass.currency,
+                latest_subscription.limit_status.label("subscription_status"),
+                latest_subscription.limit_amount.label("subscription_limit_amount"),
+                latest_subscription.currency.label("subscription_limit_currency"),
                 FundShareClass.quality_status.label("share_quality"),
                 FundShareClass.source_url.label("share_source_url"),
                 FundShareClass.source_time.label("share_source_time"),
@@ -475,6 +606,10 @@ class PostgresFundRepository(FundRepository):
                 same_day_quote.id == same_day_quote_id.scalar_subquery(),
             )
             .outerjoin(latest_scale, latest_scale.id == latest_scale_id.scalar_subquery())
+            .outerjoin(
+                latest_subscription,
+                latest_subscription.id == latest_subscription_id.scalar_subquery(),
+            )
             .outerjoin(
                 source,
                 source.id
@@ -544,29 +679,56 @@ class PostgresFundRepository(FundRepository):
             ] = metric
         return fees_by_share, metrics_by_share
 
+    @staticmethod
+    def _load_user_tags(
+        session: Session, share_ids: list[int]
+    ) -> dict[int, list[FundTagType]]:
+        if not share_ids:
+            return {}
+        tags_by_share: dict[int, list[FundTagType]] = {}
+        rows = session.execute(
+            select(UserFundTag.fund_share_class_id, UserFundTag.tag_type).where(
+                UserFundTag.user_id == SINGLE_USER_ID,
+                UserFundTag.fund_share_class_id.in_(share_ids),
+            )
+        )
+        for share_id, tag_type in rows:
+            try:
+                tags_by_share.setdefault(share_id, []).append(FundTagType(tag_type))
+            except ValueError:
+                continue
+        for tags in tags_by_share.values():
+            tags.sort(key=FUND_TAG_ORDER.__getitem__)
+        return tags_by_share
+
     def _fund_row(
         self,
         row: dict[str, Any],
         fees: dict[str, float],
         latest_metrics: dict[str, CalculatedMetric],
+        tags: list[FundTagType],
     ) -> FundComparisonRow:
 
         management = fees.get("management")
         custody = fees.get("custody")
         sales_service = fees.get("sales_service")
-        expense_rate = calculate_operating_rate(management, custody)
+        expense_rate = calculate_operating_rate(management, custody, sales_service)
         nav = float(row["nav"]) if row["nav"] is not None else None
         close = float(row["close_price"]) if row["close_price"] is not None else None
-        deviation_close = (
+        investment_scopes = row["investment_scopes"] or []
+        is_qdii = any("QDII" in str(scope).upper() for scope in investment_scopes)
+        deviation_close = close if is_qdii else (
             float(row["deviation_close_price"])
             if row["deviation_close_price"] is not None
             else None
         )
+        deviation_close_date = row["close_date"] if is_qdii else row["nav_date"]
         estimated_deviation = calculate_estimated_deviation(
             deviation_close,
-            row["nav_date"],
+            deviation_close_date,
             nav,
             row["nav_date"],
+            allow_lagged_nav=is_qdii,
         )
 
         returns = [
@@ -594,6 +756,13 @@ class PostgresFundRepository(FundRepository):
             exact_benchmark=row["benchmark_description"],
             share_class=row["share_class"],
             currency=row["currency"],
+            subscription_status=row["subscription_status"],
+            subscription_limit_amount=(
+                float(row["subscription_limit_amount"])
+                if row["subscription_limit_amount"] is not None
+                else None
+            ),
+            subscription_limit_currency=row["subscription_limit_currency"],
             exchange=row["exchange"],
             management_fee=management,
             custody_fee=custody,
@@ -613,6 +782,7 @@ class PostgresFundRepository(FundRepository):
             source_name=row["source_name"],
             source_url=row["source_url"],
             source_time=row["source_time"],
+            tags=tags,
         )
 
     @staticmethod

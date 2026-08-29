@@ -131,9 +131,11 @@ uv run python -m app.sync.szse_details --dry-run
 uv run python -m app.sync.szse_details
 uv run python -m app.sync.csrc_funds --dry-run
 uv run python -m app.sync.csrc_funds
+uv run python -m app.sync.csrc_details --dry-run
+uv run python -m app.sync.csrc_details
 ```
 
-同步命令可重复执行，但仍应避免本地和服务器同时运行。上交所脚本 A 与深交所脚本 C 每周更新基金列表和目标基金主数据；深交所脚本 C 同时从证监会最新基金产品资料概要提取管理费与托管费。上交所脚本 B 在交易日收盘后更新收盘价、净值、费率、规模、交易日和五个区间收益率；深交所脚本 D 更新最近行情，并合并深交所最近净值与证监会电子披露平台最近 400 日正式净值，随后更新估算规模、同日偏离和五个区间收益率，不重复下载费率 PDF。深交所基金规模按“万份”规模乘以规模日当日或之前最近一日的正式单位净值估算，质量状态标记为 `estimated`。证监会场外同步器会排除 ETF、LOF、指数增强和等权/质量/低波等非目标指数变体，并按官方产品 ID 合并 A/C/E 等份额。运作费率采用管理费与托管费之和，销售服务费单列；同日偏离使用最新净值日对应的同日收盘价计算。
+同步命令可重复执行，但仍应避免本地和服务器同时运行。上交所脚本 A 与深交所脚本 C 每周更新基金列表和目标基金主数据；上交所脚本 B 和深交所脚本 D 在工作日更新详情数据。场外脚本 E 每月 1 日从证监会公募基金目录筛选目标并更新基金和主份额；脚本 F 在周一至周五更新产品概要费率、季度规模、正式净值、申购状态及五个区间收益率。场外基金没有交易所交易价，不写入或计算偏离。脚本 C/F 共用 `backend/app/sync/eid_disclosures.py` 的披露 PDF 解析和费率入库逻辑。
 
 ## 验证
 
@@ -176,7 +178,7 @@ IFC_DATA_MODE=database
 IFC_CORS_ORIGINS=https://homeserver.tailed5977.ts.net
 ```
 
-安装数据同步定时任务。当前配置为脚本 A/C 每周一 `09:00`、脚本 B/D 周一至周五 `16:00`，时区为 `Asia/Shanghai`：
+安装数据同步定时任务。当前配置为脚本 A/C 每周一 `09:00`、脚本 E 每月 1 日 `09:00`、脚本 B 周一至周五 `16:00`、脚本 D/F 周一至周五 `22:00`，时区为 `Asia/Shanghai`：
 
 ```bash
 ./deploy/manage-crontab.sh print
@@ -264,5 +266,3 @@ pm2 save
 定时任务修改后只需更新 `deploy/schedules.conf` 并重新执行安装脚本。卸载项目定时任务使用 `./deploy/manage-crontab.sh remove`；该命令不会删除其他 crontab 条目。
 
 FastAPI 只监听回环地址 `127.0.0.1:6006`，对外仅开放 Nginx HTTPS 的 `/indexfund/`。开发端口 `7006` 不用于生产。PostgreSQL 的 `5432` 仅对服务器自身和明确授权的 Tailscale/局域网设备开放，绝不能直接暴露到公网。
-
-下一步补齐场外基金费率、人民币资产规模和区间收益率。沪深场内基金已经分别通过脚本 B/D 计算五个区间收益率；深交所脚本 D 会从官方电子披露平台回填最近 400 日正式净值，新部署实例不再需要等待逐日积累。

@@ -55,6 +55,11 @@ a { color: inherit; text-decoration: none; }
 }
 .icon-button:hover { border-color: #b8c8bf; background: #fff; }
 .icon-button svg { width: 18px; }
+.topbar-info-button {
+  height: 38px; padding: 0 13px; border: 1px solid var(--line); border-radius: 10px;
+  color: #52615a; background: rgba(255,255,255,.72); font-size: 11px; font-weight: 650; cursor: pointer;
+}
+.topbar-info-button:hover { border-color: #b8c8bf; color: var(--green-dark); background: #fff; }
 
 .section-kicker { color: var(--green); font-size: 12px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; }
 .workspace { margin-top: 32px; padding: 38px; border: 1px solid rgba(20,35,29,.09); border-radius: 28px; background: rgba(255,255,255,.88); box-shadow: var(--shadow); backdrop-filter: blur(12px); }
@@ -107,6 +112,11 @@ a { color: inherit; text-decoration: none; }
 }
 .multi-filter-menu label:has(input:checked) { color: var(--ink); font-weight: 600; }
 .multi-filter-menu label:has(input:checked) span { border-color: var(--green); background: var(--green); }
+.tag-filter-checkbox { height: 38px; padding: 0 6px; display: inline-flex; align-items: center; gap: 8px; color: #7a8680; font-size: 11px; cursor: pointer; user-select: none; }
+.tag-filter-checkbox.active { color: var(--ink); font-weight: 650; }
+.tag-filter-checkbox input { position: absolute; opacity: 0; pointer-events: none; }
+.tag-filter-checkbox i { width: 18px; height: 18px; display: inline-grid; place-items: center; border: 1px solid #aebbb4; border-radius: 2px; color: white; background: white; font-size: 11px; font-style: normal; font-weight: 750; }
+.tag-filter-checkbox input:checked + i { border-color: var(--green); background: var(--green); }
 .search-box { width: 427.5px; height: 38px; padding: 0 11px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 11px; background: white; }
 .search-box:focus-within { border-color: #83b89d; box-shadow: 0 0 0 3px rgba(17,121,77,.08); }
 .search-box > svg { width: 16px; flex: none; color: #84908a; }
@@ -115,15 +125,25 @@ a { color: inherit; text-decoration: none; }
 .search-box button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; background: transparent; cursor: pointer; }
 .search-box button svg { width: 15px; }
 .fund-result-summary { margin: -7px 2px 10px; display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 13px; }
-.fund-result-count, .fund-last-synced, .fund-trade-date { margin: 0; }
+.fund-result-count, .fund-last-synced, .fund-trade-date, .fund-purchase-limit { margin: 0; }
 .fund-result-summary strong { color: var(--green-dark); font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .fund-last-synced, .fund-trade-date { display: flex; align-items: center; gap: 7px; }
+.fund-purchase-limit { display: flex; align-items: center; gap: 7px; }
+.fund-purchase-limit-copy { display: flex; align-items: center; gap: 2px; }
 .fund-result-summary .status-dot { width: 6px; height: 6px; box-shadow: 0 0 0 3px rgba(36,166,106,.1); }
+.context-help-button {
+  width: 18px; height: 18px; padding: 0; display: inline-grid; flex: none; place-items: center;
+  border: 1px solid #b8c7bf; border-radius: 50%; color: #66766e; background: white;
+  font-size: 10px; font-weight: 750; line-height: 1; cursor: pointer;
+}
+.context-help-button:hover { border-color: var(--green); color: var(--green); background: var(--green-soft); }
+.context-help-button:focus-visible { outline: 2px solid rgba(17,121,77,.3); outline-offset: 2px; }
 
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 16px; }
-.fund-table { width: 100%; min-width: 1080px; border-collapse: collapse; table-layout: fixed; font-size: 14px; }
+.table-wrap { overflow-x: hidden; border: 1px solid var(--line); border-radius: 16px; }
+.fund-table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; font-size: 14px; }
 .fund-table th { padding: 13px 12px; color: #65716b; background: #f7f9f7; border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 650; letter-spacing: .03em; text-align: right; white-space: nowrap; }
-.fund-table th:nth-child(2), .fund-table th:nth-child(3), .fund-table th:nth-child(4) { text-align: left; }
+.fund-table th.code-column, .fund-table th.fund-column, .fund-table th.price-column, .fund-table th.action-column { text-align: left; }
+.fund-column-header { display: inline-flex; align-items: center; gap: 7px; }
 .fund-table th small { color: #919b96; font-size: 10px; font-weight: 500; }
 .sortable-header { padding: 0; display: inline-flex; align-items: center; gap: 4px; border: 0; color: inherit; background: transparent; font: inherit; font-weight: inherit; letter-spacing: inherit; cursor: pointer; }
 .sortable-header:hover { color: var(--ink); }
@@ -143,18 +163,33 @@ a { color: inherit; text-decoration: none; }
 .fund-table tbody tr:hover td { background: #fbfdfb; }
 .fund-table tbody tr.selected td { background: #f2faf5; }
 .fund-table th.select-column, .fund-table td.select-column { width: 42px; padding-right: 4px; text-align: center; }
-.fund-table th.code-column, .fund-table td.code-column { width: 76px; text-align: left; }
+.fund-table th.code-column, .fund-table td.code-column { width: 92px; text-align: left; }
 .code-column span { color: #4f5f57; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 .fund-code-link { color: var(--green-dark); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; text-decoration: underline; text-decoration-color: rgba(7,90,56,.28); text-underline-offset: 3px; }
 .fund-code-link:hover { color: var(--green); text-decoration-color: currentColor; }
-.fund-table th.fund-column, .fund-table td.fund-cell { width: 180px; min-width: 180px; max-width: 180px; }
+.fund-code-stack { display: flex; align-items: flex-start; flex-direction: column; gap: 7px; }
+.subscription-tag { display: inline-flex; align-items: center; width: max-content; padding: 3px 6px; border-radius: 6px; font-family: inherit !important; font-size: 9px !important; font-weight: 650; line-height: 1.2; white-space: nowrap; }
+.subscription-tag.open { color: #087346 !important; background: #e6f6ed; }
+.subscription-tag.limited { color: #9a5b12 !important; background: #fff1dc; }
+.subscription-tag.suspended { color: #b83c32 !important; background: #fde8e5; }
+.price-cell > .subscription-tag { margin: 1px 0 6px 36px; }
+.fund-table th.fund-column, .fund-table td.fund-cell { width: 220px; min-width: 220px; max-width: 220px; }
 .fund-cell { text-align: left !important; }
 .fund-name-row { display: flex; align-items: flex-start; gap: 7px; }
 .fund-name-row strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.45; }
 .fund-company { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
-.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-.tags span { padding: 3px 6px; border: 1px solid #e1e6e3; border-radius: 5px; color: #748078; background: white; font-size: 9px; }
-.price-cell { width: 112px; min-width: 112px; text-align: left !important; }
+.fund-table th.action-column, .fund-table td.action-cell { width: 64px; min-width: 64px; max-width: 64px; text-align: left; }
+.user-tag-list { margin-top: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.user-tag { padding: 3px 7px; border: 1px solid; border-radius: 6px; font-size: 9px; font-weight: 650; line-height: 1.2; }
+.user-tag.favorite { border-color: #ead081; color: #8a6100; background: #fff4cf; }
+.user-tag.holding { border-color: #91bbd5; color: #165d89; background: #e6f3fb; }
+.user-tag.recurring { border-color: #9bc9a9; color: #176b3b; background: #e8f7ed; }
+.fund-edit-button { padding: 3px 0; border: 0; color: var(--green-dark); background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; transition: color .15s; }
+.fund-edit-button:hover:not(:disabled) { color: var(--green); text-decoration: underline; text-underline-offset: 3px; }
+.fund-edit-button:disabled { color: #919c96; cursor: wait; }
+.tag-save-error { margin: 8px 3px 0; color: #b83c32; font-size: 11px; }
+.fund-table th.price-column, .fund-table td.price-cell { width: 112px; min-width: 112px; max-width: 112px; }
+.price-cell { text-align: left !important; }
 .price-cell > div { display: grid; grid-template-columns: 31px auto; align-items: start; gap: 5px; margin-bottom: 6px; }
 .price-value { display: flex; align-items: flex-start; flex-direction: column; }
 .price-cell span, .price-cell small { color: var(--muted); font-size: 11px; }
@@ -162,6 +197,8 @@ a { color: inherit; text-decoration: none; }
 .price-cell em { display: inline-block; margin-top: 2px; font-size: 11px; font-style: normal; }
 .fee-cell strong { display: block; font-size: 15px; }
 .fund-table th.fee-column, .fund-table td.fee-cell { width: 92px; min-width: 92px; max-width: 92px; }
+.fund-table th.scale-column, .fund-table td.scale-cell { width: 82px; min-width: 82px; max-width: 82px; }
+.fund-table th.return-column, .fund-table td.return-column { width: 84px; min-width: 84px; max-width: 84px; }
 .fee-cell small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .positive { color: var(--red); font-weight: 650; }
 .negative { color: var(--green); font-weight: 650; }
@@ -245,6 +282,63 @@ a { color: inherit; text-decoration: none; }
 .comparison-footer { padding: 16px 24px 20px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .comparison-footer p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .comparison-footer .primary-button { flex: none; color: white; background: var(--green); }
+.sync-info-sheet {
+  width: min(760px, 100%); max-height: calc(100vh - 48px); overflow: hidden;
+  display: flex; flex-direction: column; border: 1px solid rgba(255,255,255,.22); border-radius: 22px;
+  background: var(--panel); box-shadow: 0 28px 90px rgba(5,18,12,.32);
+}
+.fund-edit-sheet {
+  width: min(460px, 100%); overflow: hidden;
+  display: flex; flex-direction: column; border: 1px solid rgba(255,255,255,.22); border-radius: 20px;
+  background: var(--panel); box-shadow: 0 28px 90px rgba(5,18,12,.32);
+}
+.fund-edit-overlay { overflow: hidden; place-items: center; }
+.fund-edit-sheet .comparison-header h2 { font-size: 21px; }
+.fund-edit-form { padding: 22px 24px 24px; display: flex; flex-direction: column; gap: 15px; }
+.fund-edit-field { display: flex; flex-direction: column; gap: 7px; }
+.fund-edit-label { color: #52615a; font-size: 11px; font-weight: 650; }
+.fund-edit-field > input[type="text"] {
+  width: 100%; padding: 11px 12px; border: 1px solid #d9e1dd; border-radius: 9px;
+  color: #617069; background: #f5f7f6; font: inherit; font-size: 12px; outline: none;
+}
+.fund-edit-tag-control {
+  min-height: 44px; padding: 0 13px; display: flex; align-items: center; gap: 14px;
+  border: 1px solid #d9e1dd; border-radius: 9px; background: white; cursor: pointer;
+}
+.fund-edit-tag-option { display: inline-flex; align-items: center; gap: 8px; color: #5f6d66; font-size: 12px; cursor: pointer; }
+.fund-edit-tag-option input { width: 18px; height: 18px; margin: 0; padding: 0; flex: none; accent-color: var(--green); cursor: pointer; }
+.fund-edit-actions { padding-top: 5px; display: flex; justify-content: flex-end; gap: 9px; }
+.fund-edit-actions button { padding: 10px 18px; border-radius: 9px; font-size: 13px; font-weight: 650; cursor: pointer; }
+.fund-edit-cancel { border: 1px solid #d2dbd6; color: #627069; background: white; }
+.fund-edit-save { border: 1px solid var(--green); color: white; background: var(--green); }
+.fund-edit-actions button:disabled { opacity: .55; cursor: wait; }
+.sync-info-content { padding: 22px 24px 24px; overflow-y: auto; }
+.sync-info-section { padding: 0 0 18px; border-bottom: 1px solid var(--line); }
+.sync-info-section + .sync-info-section { padding-top: 18px; }
+.sync-info-section h3 { margin: 0 0 8px; color: var(--ink); font-size: 15px; }
+.sync-info-section p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.75; }
+.sync-info-note { margin-top: 20px; padding: 15px 16px; border-radius: 12px; color: #426050; background: var(--green-soft); }
+.sync-info-note strong { color: var(--green-dark); font-size: 13px; }
+.sync-info-note p { margin: 7px 0 0; font-size: 11px; line-height: 1.75; }
+.share-class-help-sheet { width: min(860px, 100%); }
+.share-class-help-content { padding: 22px 24px 24px; overflow-y: auto; }
+.share-class-intro { margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.75; }
+.share-class-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+.share-class-table { width: 100%; min-width: 660px; border-collapse: collapse; font-size: 11px; line-height: 1.7; }
+.share-class-table th, .share-class-table td { padding: 12px 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.share-class-table tr:last-child th, .share-class-table tr:last-child td { border-bottom: 0; }
+.share-class-table th:last-child, .share-class-table td:last-child { border-right: 0; }
+.share-class-table thead th { color: #63716a; background: #f6f8f6; font-weight: 650; }
+.share-class-table tbody th { width: 78px; color: var(--green-dark); background: #fbfdfb; font-size: 12px; }
+.holding-guide { margin-top: 20px; }
+.holding-guide h3 { margin: 0 0 9px; font-size: 14px; }
+.holding-guide ul { margin: 0; padding-left: 20px; color: var(--muted); font-size: 11px; line-height: 1.8; }
+.holding-guide li + li { margin-top: 5px; }
+.holding-guide strong { color: var(--ink); }
+.share-class-formula { margin-top: 18px; padding: 14px 16px; border-radius: 12px; color: #426050; background: var(--green-soft); }
+.share-class-formula strong { color: var(--green-dark); font-size: 12px; }
+.share-class-formula p { margin: 6px 0 0; font-size: 11px; line-height: 1.7; }
+.share-class-disclaimer { margin: 16px 0 0; color: #87928c; font-size: 10px; line-height: 1.7; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 @media (max-width: 720px) {
@@ -267,14 +361,20 @@ a { color: inherit; text-decoration: none; }
   .fund-card.selected { border-color: #79ae91; background: #f4faf6; box-shadow: inset 0 0 0 1px #79ae91; }
   .card-head { display: grid; grid-template-columns: 22px 1fr; align-items: start; gap: 9px; }
   .card-head > div { min-width: 0; display: flex; flex-direction: column; }
+  .card-fund-name-row { display: flex; align-items: flex-start; gap: 7px; }
   .card-head strong { font-size: 13px; }
   .card-head span { margin-top: 5px; color: var(--muted); font-family: ui-monospace, monospace; font-size: 9px; }
+  .card-head .user-tag-list { margin-top: 7px; }
+  .card-head .user-tag { margin-top: 0; font-family: inherit; }
+  .card-head .fund-edit-button { width: fit-content; margin-top: 9px; }
   .card-primary { margin-top: 16px; padding: 15px 0; display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid #e7ece9; border-bottom: 1px solid #e7ece9; }
   .card-primary > div { display: flex; flex-direction: column; gap: 6px; }
   .card-primary small, .card-details span { color: var(--muted); font-size: 9px; }
   .card-primary strong, .card-primary > div > span { font-size: 15px; }
   .card-details { padding-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 9px 16px; }
   .card-details > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .card-nav-value { display: flex; align-items: flex-end; flex-direction: column; gap: 5px; }
+  .card-nav-value .subscription-tag { margin: 0; }
   .card-details strong { font-size: 10px; }
   .card-details small { color: #a3ada8; font-size: 8px; }
   .footer { margin-top: 36px; align-items: flex-start; flex-direction: column; gap: 18px; }
@@ -284,6 +384,12 @@ a { color: inherit; text-decoration: none; }
   .primary-button { padding-inline: 12px; }
   .comparison-overlay { padding: 0; place-items: stretch; }
   .comparison-sheet { width: 100%; max-height: 100vh; border: 0; border-radius: 0; }
+  .sync-info-sheet { width: 100%; max-height: 100vh; border: 0; border-radius: 0; }
+  .fund-edit-overlay { padding: 16px; place-items: center; }
+  .fund-edit-sheet { width: min(460px, 100%); border: 1px solid rgba(255,255,255,.22); border-radius: 20px; }
+  .fund-edit-form { padding: 20px 18px 24px; }
+  .sync-info-content { padding: 20px 18px 24px; }
+  .share-class-help-content { padding: 20px 16px 24px; }
   .comparison-header { padding: 18px 16px 14px; }
   .comparison-header h2 { font-size: 21px; }
   .comparison-warning { margin: 12px 14px 0; }
@@ -292,6 +398,11 @@ a { color: inherit; text-decoration: none; }
   .comparison-table thead th:first-child, .comparison-table tbody th { width: 120px; }
   .comparison-footer { padding: 14px; align-items: stretch; flex-direction: column; gap: 10px; }
   .comparison-footer .primary-button { width: 100%; }
+}
+
+@media (min-width: 721px) and (max-width: 1280px) {
+  .table-wrap { overflow-x: auto; }
+  .fund-table { min-width: 1140px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

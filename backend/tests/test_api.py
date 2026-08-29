@@ -83,6 +83,57 @@ def test_filter_funds_by_venue() -> None:
     assert body["total"] == 2
     assert body["lastSyncedAt"] is None
     assert all(item["tradingVenue"] == "场外" for item in body["items"])
+    assert all(item["tags"] == [] for item in body["items"])
+
+
+def test_single_user_fund_tags_round_trip() -> None:
+    response = client.put(
+        "/api/v1/funds/006075/tags",
+        json={"tags": ["favorite", "holding", "recurring"]},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "fundCode": "006075",
+        "tags": ["favorite", "holding", "recurring"],
+    }
+
+    funds = client.get("/api/v1/indices/sp-500/funds", params={"venue": "场外"})
+    tagged_fund = next(
+        item for item in funds.json()["items"] if item["code"] == "006075"
+    )
+    assert tagged_fund["tags"] == ["favorite", "holding", "recurring"]
+
+    cleared = client.put("/api/v1/funds/006075/tags", json={"tags": []})
+    assert cleared.status_code == 200
+    assert cleared.json()["tags"] == []
+
+
+def test_single_user_fund_tags_validate_tag_and_fund() -> None:
+    invalid_tag = client.put(
+        "/api/v1/funds/006075/tags",
+        json={"tags": ["unknown"]},
+    )
+    missing_fund = client.put(
+        "/api/v1/funds/not-found/tags",
+        json={"tags": ["favorite"]},
+    )
+
+    assert invalid_tag.status_code == 422
+    assert missing_fund.status_code == 404
+
+
+def test_filter_exchange_with_repeated_query_parameters() -> None:
+    response = client.get(
+        "/api/v1/indices/csi-500/funds",
+        params=[
+            ("venue", "场内"),
+            ("exchange", "深交所"),
+        ],
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert [item["code"] for item in body["items"]] == ["159922"]
 
 
 def test_compare_returns_warning_for_cross_index_selection() -> None:

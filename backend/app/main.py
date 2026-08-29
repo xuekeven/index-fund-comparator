@@ -11,6 +11,8 @@ from app.config import Settings, get_settings
 from app.models import (
     ComparisonResponse,
     FundListResponse,
+    FundTagResponse,
+    FundTagUpdate,
     HealthResponse,
     IndexSummary,
     NavSeriesResponse,
@@ -31,7 +33,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.parsed_cors_origins,
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "PUT"],
     allow_headers=["*"],
 )
 
@@ -79,6 +81,10 @@ def list_index_funds(
     index_id: str,
     repository: RepositoryDep,
     venue: Literal["场内", "场外"] | None = None,
+    exchange: Annotated[
+        list[Literal["上交所", "深交所"]] | None,
+        Query(),
+    ] = None,
     structure: str | None = None,
 ) -> FundListResponse:
     index = repository.get_index(index_id)
@@ -88,6 +94,8 @@ def list_index_funds(
     funds = repository.list_funds(index_id)
     if venue:
         funds = [fund for fund in funds if fund.trading_venue.value == venue]
+    if exchange:
+        funds = [fund for fund in funds if fund.exchange in exchange]
     if structure:
         funds = [fund for fund in funds if fund.product_structure.value == structure]
 
@@ -95,7 +103,11 @@ def list_index_funds(
         index=index,
         items=funds,
         total=len(funds),
-        last_synced_at=repository.get_last_synced_at(index_id),
+        last_synced_at=repository.get_last_synced_at(
+            index_id,
+            venue=venue,
+            exchanges=tuple(exchange or ()),
+        ),
         generated_at=datetime.now(UTC),
         data_mode=settings.data_mode,
     )
@@ -154,6 +166,21 @@ def get_fund_nav(
         source_name=fund.source_name,
         generated_at=datetime.now(UTC),
     )
+
+
+@app.put(
+    f"{settings.api_prefix}/funds/{{fund_code}}/tags",
+    response_model=FundTagResponse,
+)
+def update_fund_tags(
+    fund_code: str,
+    payload: FundTagUpdate,
+    repository: RepositoryDep,
+) -> FundTagResponse:
+    tags = repository.set_fund_tags(fund_code, payload.tags)
+    if tags is None:
+        raise HTTPException(status_code=404, detail="Fund not found")
+    return FundTagResponse(fund_code=fund_code, tags=tags)
 
 
 @app.get("/{requested_path:path}", include_in_schema=False)
