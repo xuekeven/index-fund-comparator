@@ -2,7 +2,7 @@ import argparse
 import calendar
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -187,6 +187,8 @@ def calculate_return_metrics(records: list[SseNavRecord]) -> list[ReturnMetric]:
         if not eligible:
             continue
         period_start = eligible[-1]
+        if target_date - period_start > timedelta(days=14):
+            continue
         start_nav = by_date[period_start]
         metrics.append(
             ReturnMetric(

@@ -117,3 +117,19 @@ def test_calculates_five_simple_return_periods_from_nearest_prior_nav() -> None:
     assert metrics["return_1m"].value == Decimal("7.142857142857142857142857100")
     assert metrics["return_6m"].value == Decimal("25.00")
     assert metrics["return_1y"].value == Decimal("50.0")
+
+
+
+def test_does_not_calculate_return_from_stale_isolated_nav() -> None:
+    records = parse_sse_nav_history(
+        {
+            "code": "018969",
+            "kline": [
+                [20230802, 1.0000, 0],
+                [20260824, 1.7227, 0],
+                [20260827, 1.7616, 0],
+            ],
+        }
+    )
+
+    assert calculate_return_metrics(records) == []

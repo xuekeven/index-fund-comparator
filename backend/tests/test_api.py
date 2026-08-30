@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import app
+from app.sync_jobs import SyncJobBusyError, sync_job_runner
 
 
 client = TestClient(app)
@@ -66,6 +67,37 @@ def test_frontend_serves_built_asset() -> None:
 
 def test_unknown_api_route_remains_404() -> None:
     assert client.get("/api/v1/not-a-route").status_code == 404
+
+
+def test_sync_task_status_and_start(monkeypatch) -> None:
+    snapshot = {
+        "activeJob": None,
+        "currentScript": None,
+        "tasks": {"all": {"status": "idle"}},
+    }
+    monkeypatch.setattr(sync_job_runner, "snapshot", lambda: snapshot)
+    monkeypatch.setattr(
+        sync_job_runner,
+        "start",
+        lambda task: {**snapshot, "activeJob": task},
+    )
+
+    assert client.get("/api/v1/sync-tasks").json() == snapshot
+    response = client.post("/api/v1/sync-tasks/D")
+    assert response.status_code == 202
+    assert response.json()["activeJob"] == "D"
+
+
+def test_sync_task_rejects_unknown_or_overlapping_job(monkeypatch) -> None:
+    assert client.post("/api/v1/sync-tasks/unknown").status_code == 422
+
+    def raise_busy(_task):
+        raise SyncJobBusyError("正在执行")
+
+    monkeypatch.setattr(sync_job_runner, "start", raise_busy)
+    response = client.post("/api/v1/sync-tasks/A")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "正在执行"
 
 
 def test_indices_include_fund_counts() -> None:

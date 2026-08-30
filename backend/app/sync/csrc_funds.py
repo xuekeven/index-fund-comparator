@@ -25,6 +25,7 @@ from app.database_models import (
     NavDaily,
     SalesLimitHistory,
 )
+from app.sync.company_official_nav import OfficialCompanyNavFetcher
 from app.sync.eid_disclosures import (
     DisclosureDocument,
     disclosure_documents as find_disclosure_documents,
@@ -89,6 +90,7 @@ class NavRecord:
     nav_date: date
     unit_nav: Decimal
     accumulated_nav: Decimal | None
+    source_url: str = EID_NAV_URL
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,7 @@ class SubscriptionState:
     currency: str
     effective_date: date
     source_url: str
+    channel: str = "全部渠道"
     quality_status: str = "verified"
 
 
@@ -461,7 +464,8 @@ def _announcement_share_codes(
         ]
 
     match = re.search(
-        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|下属基金交易代码)"
+        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|"
+        r"下属基金交易代码|涉及基金份额类别的交易代码)"
         r"((?:\d{6})+)",
         compact,
     )
@@ -497,12 +501,14 @@ def _announcement_share_codes(
 
 
 def _announcement_limits(
+    text: str,
     compact: str,
     shares: dict[str, SummaryShare],
 ) -> dict[str, Decimal]:
     limits: dict[str, Decimal] = {}
     code_match = re.search(
-        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|下属基金交易代码)"
+        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|"
+        r"下属基金交易代码|涉及基金份额类别的交易代码)"
         r"((?:\d{6})+)",
         compact,
     )
@@ -513,6 +519,37 @@ def _announcement_limits(
         for code in _code_chunks(code_match.group(1) if code_match else "")
         if code in shares
     ]
+
+    # Keep PDF row/column whitespace long enough to distinguish values such
+    # as 100 100. Compacting first turns that row into 100100.
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        compact_line = re.sub(r"\s+", "", line)
+        if not (
+            "金额" in compact_line
+            and "单位" in compact_line
+            and (
+                "申购" in compact_line
+                or "购金额" in compact_line
+                or "限" in compact_line
+            )
+        ):
+            continue
+        value_lines: list[str] = []
+        if "）" in line:
+            value_lines.append(line.rsplit("）", 1)[-1])
+        value_lines.extend(lines[index + 1 : index + 3])
+        for value_line in value_lines:
+            values = re.findall(
+                r"(?<!\d)(\d[\d,]*(?:\.\d+)?)(?!\d)", value_line
+            )
+            if len(values) != len(ordered_codes):
+                continue
+            for code, raw_amount in zip(ordered_codes, values, strict=True):
+                limits[code] = Decimal(raw_amount.replace(",", ""))
+            break
+        if limits:
+            break
     table_match = re.search(
         r"(?:下属分级基金的限制申购金额|下属基金份额的限制金额|限制申购金额)"
         r"(?:（[^）]+）)?(.+?)(?:下属.*?限制(?:转换|定期)|2[.、]其他)",
@@ -555,9 +592,14 @@ def _announcement_limits(
     if common_limit:
         currency = "美元" if common_limit.group("unit") == "美元" else "人民币"
         amount = Decimal(common_limit.group("amount").replace(",", ""))
-        for share in shares.values():
-            if share.currency == currency:
-                limits.setdefault(share.code, amount)
+        currency_shares = [
+            share for share in shares.values() if share.currency == currency
+        ]
+        # A whitespace-free PDF table can look like one common amount even
+        # though it contains one value per share. Use this fallback only for
+        # a single in-scope share.
+        if len(currency_shares) == 1:
+            limits.setdefault(currency_shares[0].code, amount)
 
     for match in re.finditer(
         r"(?P<label>(?:本基金)?(?:[A-Z]类[、，及和]?)+基金份额)"
@@ -643,13 +685,29 @@ def parse_subscription_announcement(
         and "限制" in normalized_title
     )
     limits_large_subscription = "限制大额" in normalized_title
+    pauses_large_subscription = bool(
+        re.search(r"暂停.*?大额.*?申购", normalized_title)
+    )
+    pauses_subscription = bool(re.search(r"暂停.*?申购", normalized_title))
+    adjusts_subscription_limit = bool(
+        re.search(r"调整.*?申购.*?(?:上限|限额)", normalized_title)
+    )
     if cancels_limit or "恢复大额申购" in normalized_title:
         status = "open"
-    elif "暂停申购" in normalized_title and "暂停大额申购" not in normalized_title:
+    elif pauses_subscription and not pauses_large_subscription:
         status = "suspended"
-    elif limits_large_subscription or "大额申购" in normalized_title or (
-        ("申购" in normalized_title or "定投" in normalized_title)
-        and ("金额" in normalized_title or "限制" in normalized_title)
+    elif (
+        limits_large_subscription
+        or pauses_large_subscription
+        or "大额申购" in normalized_title
+        or adjusts_subscription_limit
+        or (
+            ("申购" in normalized_title or "定投" in normalized_title)
+            and any(
+                token in normalized_title
+                for token in ("金额", "限制", "上限", "限额")
+            )
+        )
     ):
         status = "limited"
     elif "开放申购" in normalized_title or (
@@ -661,10 +719,22 @@ def parse_subscription_announcement(
 
     codes = _announcement_share_codes(compact, normalized_title, shares)
     scoped_shares = {code: shares[code] for code in codes}
-    limits = _announcement_limits(compact, scoped_shares) if status == "limited" else {}
+    limits = (
+        _announcement_limits(text, compact, scoped_shares)
+        if status == "limited"
+        else {}
+    )
     if status == "limited" and limits:
         codes = [code for code in codes if code in limits]
     effective_date = _announcement_date(compact)
+    if "基金管理人直销电子交易平台" in compact:
+        channel = "基金管理人直销电子交易平台"
+    elif "基金管理人直销机构" in compact or "直销机构" in normalized_title:
+        channel = "基金管理人直销机构"
+    elif "直销柜台" in compact:
+        channel = "直销柜台"
+    else:
+        channel = "全部渠道"
     return [
         SubscriptionState(
             code=code,
@@ -673,6 +743,7 @@ def parse_subscription_announcement(
             currency=shares[code].currency,
             effective_date=effective_date,
             source_url=source_url,
+            channel=channel,
         )
         for code in codes
     ]
@@ -700,7 +771,8 @@ def discover_subscription_shares(
         compact = re.sub(r"\s+", "", text)
         code_match = re.search(
             r"(?:下属分级基金的交易代码|下属基金份额的交易代码|"
-            r"下属基金的交易代码|下属基金交易代码)((?:\d{6})+)",
+            r"下属基金的交易代码|下属基金交易代码|"
+            r"涉及基金份额类别的交易代码)((?:\d{6})+)",
             compact,
         )
         if code_match is None:
@@ -828,13 +900,15 @@ def resolve_subscription_states(
     states: dict[str, SubscriptionState] = {}
     warnings: list[str] = []
     for document, text in announcements:
-        if len(states) == len(shares):
-            break
         try:
             for state in parse_subscription_announcement(
                 document.title, text, shares, document.url
             ):
-                states.setdefault(state.code, state)
+                if state.effective_date > snapshot_date:
+                    continue
+                current = states.get(state.code)
+                if current is None or state.effective_date > current.effective_date:
+                    states[state.code] = state
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             warnings.append(f"{document.title}: {exc}")
 
@@ -850,35 +924,51 @@ def sync_subscription_state(
     effective_from = datetime.combine(
         state.effective_date, time.min, tzinfo=ASIA_SHANGHAI
     )
-    existing = session.scalar(
-        select(SalesLimitHistory)
-        .where(
-            SalesLimitHistory.fund_share_class_id == share_id,
-            SalesLimitHistory.channel == "全部渠道",
-            SalesLimitHistory.investor_type == "全部投资者",
-            SalesLimitHistory.business_type == "申购",
-            SalesLimitHistory.effective_to.is_(None),
+    active_records = list(
+        session.scalars(
+            select(SalesLimitHistory)
+            .where(
+                SalesLimitHistory.fund_share_class_id == share_id,
+                SalesLimitHistory.investor_type == "全部投资者",
+                SalesLimitHistory.business_type == "申购",
+                SalesLimitHistory.effective_to.is_(None),
+            )
+            .order_by(
+                SalesLimitHistory.effective_from.desc(),
+                SalesLimitHistory.id.desc(),
+            )
         )
-        .order_by(SalesLimitHistory.effective_from.desc(), SalesLimitHistory.id.desc())
-        .limit(1)
     )
-    if (
-        existing is not None
-        and existing.limit_status == state.status
-        and existing.limit_amount == state.limit_amount
-        and existing.currency == state.currency
-    ):
+    existing = next(
+        (
+            record
+            for record in active_records
+            if record.channel == state.channel
+            and record.effective_from == effective_from
+            and record.limit_status == state.status
+            and record.limit_amount == state.limit_amount
+            and record.currency == state.currency
+        ),
+        None,
+    )
+    for record in active_records:
+        if record is existing:
+            continue
+        if record.effective_from is None or record.effective_from <= effective_from:
+            record.effective_to = max(
+                effective_from,
+                record.effective_from or effective_from,
+            )
+    if existing is not None:
         existing.source_url = state.source_url
         existing.source_time = effective_from
         existing.collected_at = collected_at
         existing.quality_status = state.quality_status
         return
-    if existing is not None:
-        existing.effective_to = max(effective_from, existing.effective_from or effective_from)
     session.add(
         SalesLimitHistory(
             fund_share_class_id=share_id,
-            channel="全部渠道",
+            channel=state.channel,
             investor_type="全部投资者",
             business_type="申购",
             limit_amount=state.limit_amount,
@@ -1103,6 +1193,24 @@ def nav_lookback_days(
     return 400 if earliest is None or earliest > end_date - timedelta(days=370) else 45
 
 
+def share_nav_lookback_days(
+    session: Session,
+    code: str,
+    end_date: date,
+) -> int:
+    earliest = session.scalar(
+        select(NavDaily.nav_date)
+        .join(
+            FundShareClass,
+            FundShareClass.id == NavDaily.fund_share_class_id,
+        )
+        .where(FundShareClass.code == code)
+        .order_by(NavDaily.nav_date)
+        .limit(1)
+    )
+    return 400 if earliest is None or earliest > end_date - timedelta(days=370) else 45
+
+
 def sync_fund(
     session: Session,
     candidate: ProductCandidate,
@@ -1181,7 +1289,7 @@ def sync_fund(
             share_class = record.share_class
             currency = record.currency
             currency_form = record.currency_form
-            source_url = EID_NAV_URL
+            source_url = record.source_url
             source_time = datetime.combine(
                 record.nav_date, time.min, tzinfo=ASIA_SHANGHAI
             )
@@ -1238,7 +1346,7 @@ def sync_fund(
         values = {
             "unit_nav": record.unit_nav,
             "accumulated_nav": record.accumulated_nav,
-            "source_url": EID_NAV_URL,
+            "source_url": record.source_url,
             "source_time": datetime.combine(
                 record.nav_date, time.min, tzinfo=ASIA_SHANGHAI
             ),
@@ -1535,6 +1643,7 @@ def run_details_sync(
         headers=headers,
         transport=transport,
     ) as client:
+        company_nav_fetcher = OfficialCompanyNavFetcher(client)
         max_nav_date = fetch_max_valuation_date(client)
         snapshot_date = max_nav_date
         snapshot_time = datetime.combine(
@@ -1563,14 +1672,35 @@ def run_details_sync(
                 )
             )
             share_codes_by_product: dict[int, list[str]] = {}
-            for product_id, share_code in session.execute(
+            stored_shares_by_product: dict[int, dict[str, SummaryShare]] = {}
+            for (
+                product_id,
+                share_code,
+                display_name,
+                share_class,
+                currency,
+                currency_form,
+            ) in session.execute(
                 select(
                     FundShareClass.fund_product_id,
                     FundShareClass.code,
+                    FundShareClass.display_name,
+                    FundShareClass.share_class,
+                    FundShareClass.currency,
+                    FundShareClass.currency_form,
                 ).where(FundShareClass.status == "active")
             ):
                 share_codes_by_product.setdefault(product_id, []).append(
                     share_code
+                )
+                stored_shares_by_product.setdefault(product_id, {})[
+                    share_code
+                ] = SummaryShare(
+                    share_code,
+                    display_name,
+                    share_class,
+                    currency,
+                    currency_form,
                 )
 
             requested_codes = {
@@ -1690,11 +1820,6 @@ def run_details_sync(
                                 by_identity.values(),
                                 key=lambda item: (item.code, item.nav_date),
                             )
-                        if not records:
-                            raise RuntimeError(
-                                "no valid NAV rows by fund name or registered share codes"
-                            )
-
                         exchange_traded: bool | None = None
                         summaries: list[
                             tuple[DisclosureDocument, ProductSummary]
@@ -1791,6 +1916,90 @@ def run_details_sync(
                                 discovered_share[0],
                                 discovered_share[1],
                             )
+                        fallback_shares = {
+                            **stored_shares_by_product.get(stored_product.id, {}),
+                            **{
+                                code: source[0]
+                                for code, source in summary_shares.items()
+                            },
+                        }
+                        official_records: list[NavRecord] = []
+                        for share in fallback_shares.values():
+                            if share.currency != "美元":
+                                continue
+                            official_lookback = share_nav_lookback_days(
+                                session,
+                                share.code,
+                                max_nav_date,
+                            )
+                            current_eid_dates = [
+                                record.nav_date
+                                for record in records
+                                if record.code == share.code
+                            ]
+                            current_eid_has_year = bool(
+                                current_eid_dates
+                                and min(current_eid_dates)
+                                <= max_nav_date - timedelta(days=370)
+                            )
+                            if official_lookback == 45 or current_eid_has_year:
+                                continue
+                            try:
+                                fallback_records = company_nav_fetcher.fetch(
+                                    detail.manager,
+                                    share.code,
+                                    max_nav_date - timedelta(
+                                        days=official_lookback
+                                    ),
+                                    max_nav_date,
+                                )
+                            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                                warnings.append(
+                                    f"{share.code} {share.display_name}: "
+                                    f"official company NAV fallback failed: {exc}"
+                                )
+                                continue
+                            if not fallback_records:
+                                warnings.append(
+                                    f"{share.code} {share.display_name}: "
+                                    "official company NAV fallback returned no rows"
+                                )
+                                continue
+                            official_records.extend(
+                                NavRecord(
+                                    share.code,
+                                    share.display_name,
+                                    share.share_class,
+                                    share.currency,
+                                    share.currency_form,
+                                    record.nav_date,
+                                    record.unit_nav,
+                                    record.accumulated_nav,
+                                    record.source_url,
+                                )
+                                for record in fallback_records
+                            )
+                        if official_records:
+                            by_identity = {
+                                (record.code, record.nav_date): record
+                                for record in official_records
+                            }
+                            # EID remains the primary source whenever both
+                            # official sources publish the same share/date.
+                            by_identity.update(
+                                {
+                                    (record.code, record.nav_date): record
+                                    for record in records
+                                }
+                            )
+                            records = sorted(
+                                by_identity.values(),
+                                key=lambda item: (item.code, item.nav_date),
+                            )
+                        if not records:
+                            raise RuntimeError(
+                                "no valid NAV rows from EID or official company sources"
+                            )
                         _, share_ids, synced_nav = sync_fund(
                             session,
                             candidate,
@@ -1802,7 +2011,11 @@ def run_details_sync(
                             benchmark,
                         )
                         synced_return_metrics = 0
-                        for share_id in share_ids.values():
+                        metric_sources = {
+                            record.code: record.source_url
+                            for record in records
+                        }
+                        for code, share_id in share_ids.items():
                             metrics = calculate_return_metrics(
                                 load_return_nav_records(session, share_id)
                             )
@@ -1812,7 +2025,7 @@ def run_details_sync(
                                 candidate.target.definition_id,
                                 metrics,
                                 collected_at,
-                                EID_NAV_URL,
+                                metric_sources.get(code, EID_NAV_URL),
                             )
                             synced_return_metrics += len(metrics)
 

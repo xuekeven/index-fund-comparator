@@ -408,6 +408,90 @@ def test_parses_subscription_suspension_flags_and_limits() -> None:
     }
 
 
+def test_parses_platform_suspension_when_fund_name_sits_between_keywords() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("018064", "华夏标普500ETF发起式联接A（人民币）", "A", "人民币", None),
+            SummaryShare("018065", "华夏标普500ETF发起式联接C（人民币）", "C", "人民币", None),
+            SummaryShare("018066", "华夏标普500ETF发起式联接A（美元现汇）", "A", "美元", "现汇"),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "关于在基金管理人直销电子交易平台暂停华夏标普500ETF发起式联接基金（QDII）人民币申购业务的公告",
+        "公告送出日期2026年8月7日，自2026年8月10日起，"
+        "涉及基金份额类别的交易代码018064018065"
+        "基金管理人直销电子交易平台暂停人民币申购业务。",
+        shares,
+        "http://eid.csrc.gov.cn/fund/disclose/instance_show_pdf_id.do?instanceid=1548363",
+    )
+
+    assert [(state.code, state.status, state.channel) for state in states] == [
+        ("018064", "suspended", "基金管理人直销电子交易平台"),
+        ("018065", "suspended", "基金管理人直销电子交易平台"),
+    ]
+
+
+def test_preserves_pdf_table_columns_for_equal_subscription_limits() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("018064", "华夏标普500ETF发起式联接A（人民币）", "A", "人民币", None),
+            SummaryShare("018065", "华夏标普500ETF发起式联接C（人民币）", "C", "人民币", None),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "恢复申购业务并限制申购金额的公告",
+        """公告送出日期2026年6月26日，自2026年6月29日起
+涉及基金份额类别的交易代
+码 018064 018065
+该基金份额类别在基金管理
+人直销电子交易平台限制申
+购金额（单位：人民币元）
+100 100
+注：其他事项
+""",
+        shares,
+        "http://eid.csrc.gov.cn/fund/disclose/instance_show_pdf_id.do?instanceid=1513627",
+    )
+
+    assert [(state.code, state.limit_amount) for state in states] == [
+        ("018064", Decimal("100")),
+        ("018065", Decimal("100")),
+    ]
+
+
+def test_resolves_subscription_state_by_effective_date_not_document_order() -> None:
+    shares = {
+        "018064": SummaryShare(
+            "018064", "华夏标普500ETF发起式联接A（人民币）", "A", "人民币", None
+        )
+    }
+    announcements = [
+        (
+            DisclosureDocument("恢复申购并限制金额公告", "https://example.test/old.pdf"),
+            "自2026年6月29日起限制申购金额（单位：人民币元）100元",
+        ),
+        (
+            DisclosureDocument(
+                "暂停华夏标普500ETF发起式联接基金人民币申购业务的公告",
+                "https://example.test/new.pdf",
+            ),
+            "自2026年8月10日起暂停人民币申购业务",
+        ),
+    ]
+
+    states, warnings = resolve_subscription_states(
+        announcements, shares, date(2026, 8, 30), "https://example.test/detail"
+    )
+
+    assert warnings == []
+    assert states["018064"].status == "suspended"
+    assert states["018064"].effective_date == date(2026, 8, 10)
+
+
 def test_parses_combined_share_limit_in_yuan_and_ignores_dash_flag() -> None:
     shares = {
         share.code: share

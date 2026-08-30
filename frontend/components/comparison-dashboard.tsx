@@ -24,6 +24,8 @@ import { ComparisonView } from "./comparison-view";
 import { FundCards, FundTable } from "./fund-table";
 import { ShareClassHelpDialog } from "./share-class-help-dialog";
 import { SyncInfoDialog } from "./sync-info-dialog";
+import { FUND_TAG_META } from "./fund-tag-meta";
+import { TaggedFundsDialog } from "./tagged-funds-dialog";
 
 type CachedFunds = {
   items: FundComparisonRow[];
@@ -170,10 +172,15 @@ export function ComparisonDashboard() {
   const [shareClassHelpOpen, setShareClassHelpOpen] = useState(false);
   const [tagSavingCodes, setTagSavingCodes] = useState<string[]>([]);
   const [tagError, setTagError] = useState<string | null>(null);
+  const [taggedDialogTag, setTaggedDialogTag] = useState<FundTag | null>(null);
+  const [taggedFunds, setTaggedFunds] = useState<FundComparisonRow[]>([]);
+  const [taggedFundsLoading, setTaggedFundsLoading] = useState(false);
+  const [taggedFundsError, setTaggedFundsError] = useState<string | null>(null);
   const fundCache = useRef(new Map<string, CachedFunds>());
   const fundController = useRef<AbortController | null>(null);
   const fundRequestId = useRef(0);
   const comparisonController = useRef<AbortController | null>(null);
+  const taggedFundsController = useRef<AbortController | null>(null);
 
   const loadIndices = useCallback(async (signal?: AbortSignal) => {
     const items = await getIndices(signal);
@@ -279,6 +286,7 @@ export function ComparisonDashboard() {
   useEffect(() => () => {
     fundController.current?.abort();
     comparisonController.current?.abort();
+    taggedFundsController.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -313,6 +321,10 @@ export function ComparisonDashboard() {
     () => Array.from(new Set(funds.map((fund) => fund.currency)))
       .sort((left, right) => left.localeCompare(right, "zh-CN")),
     [funds],
+  );
+  const indexNames = useMemo(
+    () => Object.fromEntries(indices.map((index) => [index.id, index.shortName])),
+    [indices],
   );
   useEffect(() => {
     if (venue !== "场外" || funds.length === 0) return;
@@ -438,6 +450,47 @@ export function ComparisonDashboard() {
     }
   }
 
+  async function openTaggedFunds(tag: FundTag) {
+    taggedFundsController.current?.abort();
+    const controller = new AbortController();
+    taggedFundsController.current = controller;
+    setTaggedDialogTag(tag);
+    setTaggedFunds([]);
+    setTaggedFundsError(null);
+    setTaggedFundsLoading(true);
+    try {
+      const responses = await Promise.all(
+        indices.flatMap((index) => (["场内", "场外"] as const).map(
+          (itemVenue) => getFunds(index.id, itemVenue, [], controller.signal),
+        )),
+      );
+      if (taggedFundsController.current !== controller) return;
+      const taggedByCode = new Map<string, FundComparisonRow>();
+      responses.forEach((response) => {
+        response.items.forEach((fund) => {
+          if (fund.tags.includes(tag)) taggedByCode.set(fund.code, fund);
+        });
+      });
+      const taggedItems = [...taggedByCode.values()].sort((left, right) => (
+        (INDEX_ORDER[left.indexId] ?? 99) - (INDEX_ORDER[right.indexId] ?? 99)
+        || left.tradingVenue.localeCompare(right.tradingVenue, "zh-CN")
+        || left.displayName.localeCompare(right.displayName, "zh-CN")
+        || left.code.localeCompare(right.code)
+      ));
+      setTaggedFunds(taggedItems);
+    } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === "AbortError") return;
+      if (taggedFundsController.current === controller) {
+        setTaggedFundsError("暂时无法获取标签基金，请稍后重试。");
+      }
+    } finally {
+      if (taggedFundsController.current === controller) {
+        taggedFundsController.current = null;
+        setTaggedFundsLoading(false);
+      }
+    }
+  }
+
   async function refresh() {
     setLoading(true);
     fundCache.current.delete(fundCacheKey(activeIndex, venue, exchanges));
@@ -487,27 +540,46 @@ export function ComparisonDashboard() {
 
   const closeSyncInfo = useCallback(() => setSyncInfoOpen(false), []);
   const closeShareClassHelp = useCallback(() => setShareClassHelpOpen(false), []);
+  const closeTaggedFunds = useCallback(() => {
+    taggedFundsController.current?.abort();
+    taggedFundsController.current = null;
+    setTaggedDialogTag(null);
+  }, []);
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#top" aria-label="同指数首页">
-          <MarkIcon className="brand-mark" />
-          <span>
-            <strong>同指数</strong>
-            <small>指数基金比较</small>
-          </span>
-        </a>
-        <div className="topbar-actions">
-          <button
-            className="topbar-info-button"
-            type="button"
-            onClick={() => setSyncInfoOpen(true)}
-            aria-label="查看数据同步机制"
-            title="数据同步机制"
-          >
-            数据同步机制
-          </button>
+        <div className="topbar-start">
+          <a className="brand" href="#top" aria-label="同指基首页">
+            <MarkIcon className="brand-mark" />
+            <span>
+              <strong>同指基</strong>
+              <small>指数基金比较</small>
+            </span>
+          </a>
+          <div className="topbar-actions">
+            <button
+              className="topbar-info-button"
+              type="button"
+              onClick={() => setSyncInfoOpen(true)}
+              aria-label="查看数据同步"
+              title="数据同步"
+            >
+              数据同步
+            </button>
+          </div>
+          <nav className="tag-shortcuts" aria-label="我的基金标签">
+            {FUND_TAG_ORDER.map((tag) => (
+              <button
+                key={tag}
+                className={`tag-shortcut ${tag}`}
+                type="button"
+                onClick={() => void openTaggedFunds(tag)}
+              >
+                {FUND_TAG_META[tag].title}
+              </button>
+            ))}
+          </nav>
         </div>
       </header>
 
@@ -696,7 +768,7 @@ export function ComparisonDashboard() {
       </main>
 
       <footer className="footer page-width">
-        <div className="brand footer-brand"><MarkIcon className="brand-mark" /><span><strong>同指数</strong><small>客观数据，不构成投资建议</small></span></div>
+        <div className="brand footer-brand"><MarkIcon className="brand-mark" /><span><strong>同指基</strong><small>客观数据，不构成投资建议</small></span></div>
         <p>数据以来源页面及标注日期为准</p>
       </footer>
 
@@ -723,6 +795,17 @@ export function ComparisonDashboard() {
           error={comparisonError}
           onClose={closeComparison}
           onRetry={startComparison}
+        />
+      )}
+      {taggedDialogTag && (
+        <TaggedFundsDialog
+          tag={taggedDialogTag}
+          funds={taggedFunds}
+          indexNames={indexNames}
+          loading={taggedFundsLoading}
+          error={taggedFundsError}
+          onClose={closeTaggedFunds}
+          onRetry={() => void openTaggedFunds(taggedDialogTag)}
         />
       )}
       {syncInfoOpen && <SyncInfoDialog onClose={closeSyncInfo} />}

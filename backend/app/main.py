@@ -18,6 +18,7 @@ from app.models import (
     NavSeriesResponse,
 )
 from app.repository import FundRepository, get_repository
+from app.sync_jobs import SyncJobBusyError, SyncTaskKey, sync_job_runner
 
 
 settings = get_settings()
@@ -33,7 +34,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.parsed_cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "PUT"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["*"],
 )
 
@@ -181,6 +182,19 @@ def update_fund_tags(
     if tags is None:
         raise HTTPException(status_code=404, detail="Fund not found")
     return FundTagResponse(fund_code=fund_code, tags=tags)
+
+
+@app.get(f"{settings.api_prefix}/sync-tasks")
+def get_sync_tasks() -> dict[str, object]:
+    return sync_job_runner.snapshot()
+
+
+@app.post(f"{settings.api_prefix}/sync-tasks/{{task}}", status_code=202)
+def start_sync_task(task: SyncTaskKey) -> dict[str, object]:
+    try:
+        return sync_job_runner.start(task)
+    except SyncJobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/{requested_path:path}", include_in_schema=False)

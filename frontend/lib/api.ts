@@ -10,6 +10,20 @@ import type {
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "/indexfund/api/v1";
 
+export type SyncTaskKey = "all" | "A" | "B" | "C" | "D" | "E" | "F";
+export type SyncTaskState = {
+  status: "idle" | "queued" | "running" | "succeeded" | "failed";
+  startedAt: string | null;
+  finishedAt: string | null;
+  returnCode: number | null;
+  output: string;
+};
+export type SyncTaskSnapshot = {
+  activeJob: SyncTaskKey | null;
+  currentScript: Exclude<SyncTaskKey, "all"> | null;
+  tasks: Record<SyncTaskKey, SyncTaskState>;
+};
+
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     signal,
@@ -32,6 +46,18 @@ async function putJson<T>(path: string, body: unknown): Promise<T> {
   });
   if (!response.ok) {
     throw new Error(`API request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function postJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail ?? `API request failed: ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
@@ -70,4 +96,12 @@ export function updateFundTags(
     `/funds/${encodeURIComponent(fundCode)}/tags`,
     { tags },
   );
+}
+
+export function getSyncTasks(signal?: AbortSignal): Promise<SyncTaskSnapshot> {
+  return getJson<SyncTaskSnapshot>("/sync-tasks", signal);
+}
+
+export function startSyncTask(task: SyncTaskKey): Promise<SyncTaskSnapshot> {
+  return postJson<SyncTaskSnapshot>(`/sync-tasks/${task}`);
 }
