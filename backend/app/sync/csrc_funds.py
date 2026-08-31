@@ -451,16 +451,32 @@ def _announcement_share_codes(
     title: str,
     shares: dict[str, SummaryShare],
 ) -> list[str]:
+    normalized_title = re.sub(r"\s+", "", title)
+    currency_scope: str | None = None
+    if re.search(r"人民币(?:份额)?.{0,8}?(?:申购|定投)", normalized_title):
+        currency_scope = "人民币"
+    elif re.search(
+        r"美元(?:现汇|现钞)?(?:份额)?.{0,8}?(?:申购|定投)",
+        normalized_title,
+    ):
+        currency_scope = "美元"
+
+    def share_is_in_scope(share: SummaryShare) -> bool:
+        return currency_scope is None or share.currency == currency_scope
+
+    normalized_upper_title = normalized_title.upper()
+    classes = set(re.findall(r"([A-Z])类", normalized_upper_title))
     class_match = re.search(
         r"((?:[A-Z][、和及]?)+)(?:两|三|四)?类(?:基金)?份额",
-        title.upper(),
+        normalized_upper_title,
     )
     if class_match:
-        classes = set(re.findall(r"[A-Z]", class_match.group(1)))
+        classes.update(re.findall(r"[A-Z]", class_match.group(1)))
+    if classes:
         return [
             code
             for code, share in shares.items()
-            if share.share_class in classes
+            if share.share_class in classes and share_is_in_scope(share)
         ]
 
     match = re.search(
@@ -474,7 +490,10 @@ def _announcement_share_codes(
         # the concatenated codes: ``018966...021773额的交易代码``.
         match = re.search(r"((?:\d{6})+)额的交易代码", compact)
     codes = list(_code_chunks(match.group(1))) if match else []
-    codes = [code for code in codes if code in shares]
+    codes = [
+        code for code in codes
+        if code in shares and share_is_in_scope(shares[code])
+    ]
     if codes:
         flag_match = re.search(
             r"(?:该分级基金是否|该基金份额是否|下属分级基金是否)"
@@ -495,9 +514,9 @@ def _announcement_share_codes(
         return [
             code
             for code, share in shares.items()
-            if share.share_class in classes
+            if share.share_class in classes and share_is_in_scope(share)
         ]
-    return list(shares)
+    return [code for code, share in shares.items() if share_is_in_scope(share)]
 
 
 def _announcement_limits(
@@ -920,18 +939,19 @@ def sync_subscription_state(
     share_id: int,
     state: SubscriptionState,
     collected_at: datetime,
+    *,
+    authoritative: bool = False,
 ) -> None:
     effective_from = datetime.combine(
         state.effective_date, time.min, tzinfo=ASIA_SHANGHAI
     )
-    active_records = list(
+    records = list(
         session.scalars(
             select(SalesLimitHistory)
             .where(
                 SalesLimitHistory.fund_share_class_id == share_id,
                 SalesLimitHistory.investor_type == "全部投资者",
                 SalesLimitHistory.business_type == "申购",
-                SalesLimitHistory.effective_to.is_(None),
             )
             .order_by(
                 SalesLimitHistory.effective_from.desc(),
@@ -939,18 +959,32 @@ def sync_subscription_state(
             )
         )
     )
+    active_records = [record for record in records if record.effective_to is None]
+    matching_records = [
+        record
+        for record in records
+        if record.channel == state.channel
+        and record.effective_from == effective_from
+        and record.limit_status == state.status
+        and record.limit_amount == state.limit_amount
+        and record.currency == state.currency
+    ]
     existing = next(
-        (
-            record
-            for record in active_records
-            if record.channel == state.channel
-            and record.effective_from == effective_from
-            and record.limit_status == state.status
-            and record.limit_amount == state.limit_amount
-            and record.currency == state.currency
-        ),
+        (record for record in matching_records if record.effective_to is None),
         None,
     )
+    if existing is None and authoritative and matching_records:
+        existing = matching_records[0]
+        existing.effective_to = None
+
+    newer_active_exists = any(
+        record.effective_from is not None
+        and record.effective_from > effective_from
+        for record in active_records
+    )
+    if newer_active_exists and not authoritative:
+        return
+
     for record in active_records:
         if record is existing:
             continue
@@ -959,6 +993,12 @@ def sync_subscription_state(
                 effective_from,
                 record.effective_from or effective_from,
             )
+        elif authoritative:
+            # The complete official announcement timeline no longer assigns
+            # this later record to the share (for example, a RMB-only notice
+            # previously applied to a USD share). Keep the row for audit, but
+            # make its effective interval empty so it cannot remain current.
+            record.effective_to = record.effective_from
     if existing is not None:
         existing.source_url = state.source_url
         existing.source_time = effective_from
@@ -2060,7 +2100,14 @@ def run_details_sync(
                             if share_id is None:
                                 continue
                             sync_subscription_state(
-                                session, share_id, state, collected_at
+                                session,
+                                share_id,
+                                state,
+                                collected_at,
+                                authoritative=(
+                                    not announcement_warnings
+                                    and not state_warnings
+                                ),
                             )
                             synced_subscription_states += 1
 

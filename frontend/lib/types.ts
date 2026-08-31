@@ -79,3 +79,28 @@ export interface ComparisonResponse {
   warnings: string[];
   metadata: Record<string, unknown>;
 }
+
+
+export type InvestmentNoteCategory = "长期" | "实时";
+export type InvestmentNoteAction = "加仓" | "减仓" | "清仓" | "持有" | "观察";
+
+export interface InvestmentNotePayload {
+  noteDate: string;
+  title: string;
+  category: InvestmentNoteCategory;
+  action: InvestmentNoteAction | null;
+  sourceName: string | null;
+  sourceUrl: string | null;
+  sourceExcerpt: string | null;
+  ownSummary: string | null;
+  contentMarkdown: string;
+  tags: string[];
+  indexIds: string[];
+  fundCodes: string[];
+}
+
+export interface InvestmentNote extends InvestmentNotePayload {
+  id: number;
+  createdAt: string;
+  updatedAt: string;
+}

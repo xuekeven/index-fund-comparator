@@ -16,6 +16,7 @@ CORE_TABLES = {
     "sales_limit_history",
     "calculated_metric",
     "user_fund_tag",
+    "investment_note",
 }
 
 
@@ -58,3 +59,25 @@ def test_single_user_tags_are_bound_to_fund_shares() -> None:
     assert "favorite" in str(tag_constraint.sqltext)
     assert "holding" in str(tag_constraint.sqltext)
     assert "recurring" in str(tag_constraint.sqltext)
+
+
+
+def test_investment_notes_are_single_user_and_structured() -> None:
+    note_table = Base.metadata.tables["investment_note"]
+    category_constraint = next(
+        constraint
+        for constraint in note_table.constraints
+        if constraint.name == "ck_investment_note_category"
+    )
+    action_constraint = next(
+        constraint
+        for constraint in note_table.constraints
+        if constraint.name == "ck_investment_note_action"
+    )
+
+    assert "user_id" in note_table.columns
+    assert "长期" in str(category_constraint.sqltext)
+    assert "实时" in str(category_constraint.sqltext)
+    assert "加仓" in str(action_constraint.sqltext)
+    assert "index_ids" in note_table.columns
+    assert "fund_codes" in note_table.columns

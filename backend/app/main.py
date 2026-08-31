@@ -15,6 +15,9 @@ from app.models import (
     FundTagUpdate,
     HealthResponse,
     IndexSummary,
+    InvestmentNoteCreate,
+    InvestmentNoteItem,
+    InvestmentNoteUpdate,
     NavSeriesResponse,
 )
 from app.repository import FundRepository, get_repository
@@ -34,7 +37,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.parsed_cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -182,6 +185,56 @@ def update_fund_tags(
     if tags is None:
         raise HTTPException(status_code=404, detail="Fund not found")
     return FundTagResponse(fund_code=fund_code, tags=tags)
+
+
+@app.get(
+    f"{settings.api_prefix}/notes",
+    response_model=list[InvestmentNoteItem],
+)
+def list_investment_notes(
+    repository: RepositoryDep,
+    q: str | None = None,
+    category: Literal["长期", "实时"] | None = None,
+    year: Annotated[int | None, Query(ge=2000, le=2100)] = None,
+) -> list[InvestmentNoteItem]:
+    return repository.list_notes(query=q, category=category, year=year)
+
+
+@app.post(
+    f"{settings.api_prefix}/notes",
+    response_model=InvestmentNoteItem,
+    status_code=201,
+)
+def create_investment_note(
+    payload: InvestmentNoteCreate,
+    repository: RepositoryDep,
+) -> InvestmentNoteItem:
+    return repository.create_note(payload)
+
+
+@app.put(
+    f"{settings.api_prefix}/notes/{{note_id}}",
+    response_model=InvestmentNoteItem,
+)
+def update_investment_note(
+    note_id: int,
+    payload: InvestmentNoteUpdate,
+    repository: RepositoryDep,
+) -> InvestmentNoteItem:
+    note = repository.update_note(note_id, payload)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Investment note not found")
+    return note
+
+
+@app.delete(f"{settings.api_prefix}/notes/{{note_id}}")
+def delete_investment_note(
+    note_id: int,
+    repository: RepositoryDep,
+) -> dict[str, bool]:
+    if not repository.delete_note(note_id):
+        raise HTTPException(status_code=404, detail="Investment note not found")
+    return {"deleted": True}
 
 
 @app.get(f"{settings.api_prefix}/sync-tasks")

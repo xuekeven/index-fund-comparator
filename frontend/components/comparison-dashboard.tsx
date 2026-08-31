@@ -25,6 +25,7 @@ import { FundCards, FundTable } from "./fund-table";
 import { ShareClassHelpDialog } from "./share-class-help-dialog";
 import { SyncInfoDialog } from "./sync-info-dialog";
 import { FUND_TAG_META } from "./fund-tag-meta";
+import { InvestmentNotes } from "./investment-notes";
 import { TaggedFundsDialog } from "./tagged-funds-dialog";
 
 type CachedFunds = {
@@ -144,6 +145,9 @@ function SingleSelectFilter({
 
 export function ComparisonDashboard() {
   const [initialFilters] = useState(readFilterPreferences);
+  const [activePage, setActivePage] = useState<"funds" | "notes">(
+    () => window.location.hash === "#notes" ? "notes" : "funds",
+  );
   const [indices, setIndices] = useState<IndexSummary[]>([]);
   const [activeIndex, setActiveIndex] = useState(initialFilters.activeIndex);
   const [venue, setVenue] = useState<VenueFilter>(initialFilters.venue);
@@ -550,45 +554,76 @@ export function ComparisonDashboard() {
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar-start">
-          <a className="brand" href="#top" aria-label="同指基首页">
+          <a
+            className="brand"
+            href="#funds"
+            aria-label="投资札记首页"
+            onClick={() => setActivePage("funds")}
+          >
             <MarkIcon className="brand-mark" />
             <span>
-              <strong>同指基</strong>
-              <small>指数基金比较</small>
+              <strong>投资札记</strong>
+              <small>基金比较与投资复盘</small>
             </span>
           </a>
-          <div className="topbar-actions">
+          <nav className="primary-nav" aria-label="主要功能">
             <button
-              className="topbar-info-button"
+              className={activePage === "funds" ? "active" : ""}
               type="button"
-              onClick={() => setSyncInfoOpen(true)}
-              aria-label="查看数据同步"
-              title="数据同步"
+              onClick={() => {
+                window.location.hash = "funds";
+                setActivePage("funds");
+              }}
             >
-              数据同步
+              同类基金
             </button>
-          </div>
-          <nav className="tag-shortcuts" aria-label="我的基金标签">
-            {FUND_TAG_ORDER.map((tag) => (
-              <button
-                key={tag}
-                className={`tag-shortcut ${tag}`}
-                type="button"
-                onClick={() => void openTaggedFunds(tag)}
-              >
-                {FUND_TAG_META[tag].title}
-              </button>
-            ))}
+            <button
+              className={activePage === "notes" ? "active" : ""}
+              type="button"
+              onClick={() => {
+                window.location.hash = "notes";
+                setActivePage("notes");
+              }}
+            >
+              投资笔记
+            </button>
           </nav>
         </div>
       </header>
 
+      {activePage === "notes" ? (
+        <InvestmentNotes />
+      ) : (
+        <>
       <main id="top">
         <section className="workspace page-width" aria-labelledby="workspace-title">
           <div className="workspace-head">
             <div>
               <span className="section-kicker">选择基准</span>
               <h2 id="workspace-title">比较同类基金</h2>
+            </div>
+            <div className="workspace-actions">
+              <nav className="tag-shortcuts" aria-label="我的基金标签">
+                {FUND_TAG_ORDER.map((tag) => (
+                  <button
+                    key={tag}
+                    className={`tag-shortcut ${tag}`}
+                    type="button"
+                    onClick={() => void openTaggedFunds(tag)}
+                  >
+                    {FUND_TAG_META[tag].title}
+                  </button>
+                ))}
+              </nav>
+              <button
+                className="topbar-info-button"
+                type="button"
+                onClick={() => setSyncInfoOpen(true)}
+                aria-label="查看数据同步"
+                title="数据同步"
+              >
+                数据同步
+              </button>
             </div>
           </div>
 
@@ -768,7 +803,7 @@ export function ComparisonDashboard() {
       </main>
 
       <footer className="footer page-width">
-        <div className="brand footer-brand"><MarkIcon className="brand-mark" /><span><strong>同指基</strong><small>客观数据，不构成投资建议</small></span></div>
+        <div className="brand footer-brand"><MarkIcon className="brand-mark" /><span><strong>投资札记</strong><small>客观数据，不构成投资建议</small></span></div>
         <p>数据以来源页面及标注日期为准</p>
       </footer>
 
@@ -785,6 +820,9 @@ export function ComparisonDashboard() {
             </button>
           </div>
         </aside>
+      )}
+
+        </>
       )}
 
       {comparisonOpen && (

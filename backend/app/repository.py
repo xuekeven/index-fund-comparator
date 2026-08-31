@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -18,6 +18,7 @@ from app.database_models import (
     FundShareClass,
     IndexDefinition,
     IndexFamily,
+    InvestmentNote,
     MarketQuote,
     NavDaily,
     SalesLimitHistory,
@@ -29,6 +30,9 @@ from app.models import (
     FundComparisonRow,
     FundTagType,
     IndexSummary,
+    InvestmentNoteCreate,
+    InvestmentNoteItem,
+    InvestmentNoteUpdate,
     MetricValue,
     NavPoint,
 )
@@ -47,6 +51,49 @@ FUND_TAG_ORDER = {
     FundTagType.HOLDING: 1,
     FundTagType.RECURRING: 2,
 }
+
+
+def _normalized_note_values(
+    payload: InvestmentNoteCreate | InvestmentNoteUpdate,
+) -> dict[str, Any]:
+    values = payload.model_dump()
+    values["title"] = payload.title.strip()
+    values["category"] = payload.category.value
+    values["action"] = payload.action.value if payload.action else None
+    for field in (
+        "source_name",
+        "source_url",
+        "source_excerpt",
+        "own_summary",
+    ):
+        value = values[field]
+        values[field] = value.strip() if value and value.strip() else None
+    values["content_markdown"] = payload.content_markdown.strip()
+    for field in ("tags", "index_ids", "fund_codes"):
+        values[field] = list(
+            dict.fromkeys(value.strip() for value in values[field] if value.strip())
+        )
+    return values
+
+
+def _note_item(note: InvestmentNote) -> InvestmentNoteItem:
+    return InvestmentNoteItem(
+        id=note.id,
+        note_date=note.note_date,
+        title=note.title,
+        category=note.category,
+        action=note.action,
+        source_name=note.source_name,
+        source_url=note.source_url,
+        source_excerpt=note.source_excerpt,
+        own_summary=note.own_summary,
+        content_markdown=note.content_markdown,
+        tags=list(note.tags or []),
+        index_ids=list(note.index_ids or []),
+        fund_codes=list(note.fund_codes or []),
+        created_at=note.created_at,
+        updated_at=note.updated_at,
+    )
 
 
 def calculate_operating_rate(
@@ -114,6 +161,25 @@ class FundRepository(ABC):
     ) -> list[FundTagType] | None: ...
 
     @abstractmethod
+    def list_notes(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+        year: int | None = None,
+    ) -> list[InvestmentNoteItem]: ...
+
+    @abstractmethod
+    def create_note(self, payload: InvestmentNoteCreate) -> InvestmentNoteItem: ...
+
+    @abstractmethod
+    def update_note(
+        self, note_id: int, payload: InvestmentNoteUpdate
+    ) -> InvestmentNoteItem | None: ...
+
+    @abstractmethod
+    def delete_note(self, note_id: int) -> bool: ...
+
+    @abstractmethod
     def get_nav(
         self,
         code: str,
@@ -136,6 +202,29 @@ class SampleFundRepository(FundRepository):
             IndexSummary.model_validate({**row, "fund_count": counts.get(row["id"], 0)})
             for row in INDEX_ROWS
         ]
+        now = datetime.now(UTC)
+        self._notes = [
+            InvestmentNoteItem(
+                id=1,
+                note_date=date(2026, 7, 21),
+                title="加减仓",
+                category="长期",
+                action="加仓",
+                source_name="tombkeeper（群）",
+                source_excerpt="- 加仓要慢：分批低吸，确认方向\n- 清仓要快：确认结束，立即执行",
+                own_summary=(
+                    "QDII 基金限购且非实时交易，除非确认行情结束，"
+                    "否则不要轻易卖出；场内品种更适合即时调整。"
+                ),
+                content_markdown="记录市场判断，也记录判断成立的条件和失效信号。",
+                tags=["加减仓", "QDII"],
+                index_ids=["sp-500", "nasdaq-100"],
+                fund_codes=[],
+                created_at=now,
+                updated_at=now,
+            )
+        ]
+        self._next_note_id = 2
 
     def list_indices(self) -> list[IndexSummary]:
         return self._indices
@@ -173,6 +262,72 @@ class SampleFundRepository(FundRepository):
             self._funds[index] = fund.model_copy(update={"tags": normalized})
             return normalized
         return None
+
+    def list_notes(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+        year: int | None = None,
+    ) -> list[InvestmentNoteItem]:
+        normalized_query = query.strip().casefold() if query else None
+        notes = [
+            note
+            for note in self._notes
+            if (category is None or note.category.value == category)
+            and (year is None or note.note_date.year == year)
+            and (
+                normalized_query is None
+                or normalized_query
+                in " ".join(
+                    filter(
+                        None,
+                        (
+                            note.title,
+                            note.source_name,
+                            note.source_excerpt,
+                            note.own_summary,
+                            note.content_markdown,
+                            " ".join(note.tags),
+                        ),
+                    )
+                ).casefold()
+            )
+        ]
+        return sorted(notes, key=lambda note: (note.note_date, note.id), reverse=True)
+
+    def create_note(self, payload: InvestmentNoteCreate) -> InvestmentNoteItem:
+        now = datetime.now(UTC)
+        note = InvestmentNoteItem(
+            id=self._next_note_id,
+            **_normalized_note_values(payload),
+            created_at=now,
+            updated_at=now,
+        )
+        self._next_note_id += 1
+        self._notes.append(note)
+        return note
+
+    def update_note(
+        self, note_id: int, payload: InvestmentNoteUpdate
+    ) -> InvestmentNoteItem | None:
+        for index, note in enumerate(self._notes):
+            if note.id != note_id:
+                continue
+            updated = InvestmentNoteItem.model_validate(
+                {
+                    **note.model_dump(),
+                    **_normalized_note_values(payload),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            self._notes[index] = updated
+            return updated
+        return None
+
+    def delete_note(self, note_id: int) -> bool:
+        original_count = len(self._notes)
+        self._notes = [note for note in self._notes if note.id != note_id]
+        return len(self._notes) != original_count
 
     def get_nav(
         self,
@@ -425,6 +580,84 @@ class PostgresFundRepository(FundRepository):
             )
             session.commit()
             return normalized
+
+    def list_notes(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+        year: int | None = None,
+    ) -> list[InvestmentNoteItem]:
+        with self._session_factory() as session:
+            statement = select(InvestmentNote).where(
+                InvestmentNote.user_id == SINGLE_USER_ID
+            )
+            if category is not None:
+                statement = statement.where(InvestmentNote.category == category)
+            if year is not None:
+                statement = statement.where(
+                    func.extract("year", InvestmentNote.note_date) == year
+                )
+            if query and query.strip():
+                pattern = f"%{query.strip()}%"
+                statement = statement.where(
+                    or_(
+                        InvestmentNote.title.ilike(pattern),
+                        InvestmentNote.source_name.ilike(pattern),
+                        InvestmentNote.source_excerpt.ilike(pattern),
+                        InvestmentNote.own_summary.ilike(pattern),
+                        InvestmentNote.content_markdown.ilike(pattern),
+                    )
+                )
+            notes = session.scalars(
+                statement.order_by(
+                    InvestmentNote.note_date.desc(), InvestmentNote.id.desc()
+                )
+            ).all()
+            return [_note_item(note) for note in notes]
+
+    def create_note(self, payload: InvestmentNoteCreate) -> InvestmentNoteItem:
+        with self._session_factory() as session:
+            note = InvestmentNote(
+                user_id=SINGLE_USER_ID,
+                **_normalized_note_values(payload),
+            )
+            session.add(note)
+            session.commit()
+            session.refresh(note)
+            return _note_item(note)
+
+    def update_note(
+        self, note_id: int, payload: InvestmentNoteUpdate
+    ) -> InvestmentNoteItem | None:
+        with self._session_factory() as session:
+            note = session.scalar(
+                select(InvestmentNote).where(
+                    InvestmentNote.id == note_id,
+                    InvestmentNote.user_id == SINGLE_USER_ID,
+                )
+            )
+            if note is None:
+                return None
+            for field, value in _normalized_note_values(payload).items():
+                setattr(note, field, value)
+            note.updated_at = datetime.now(UTC)
+            session.commit()
+            session.refresh(note)
+            return _note_item(note)
+
+    def delete_note(self, note_id: int) -> bool:
+        with self._session_factory() as session:
+            note = session.scalar(
+                select(InvestmentNote).where(
+                    InvestmentNote.id == note_id,
+                    InvestmentNote.user_id == SINGLE_USER_ID,
+                )
+            )
+            if note is None:
+                return False
+            session.delete(note)
+            session.commit()
+            return True
 
     def get_nav(
         self,

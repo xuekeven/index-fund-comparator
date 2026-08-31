@@ -224,6 +224,45 @@ class UserFundTag(Base, TimestampMixin):
     )
 
 
+class InvestmentNote(Base, TimestampMixin):
+    __tablename__ = "investment_note"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    note_date: Mapped[date] = mapped_column(Date, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    category: Mapped[str] = mapped_column(String(24), nullable=False)
+    action: Mapped[str | None] = mapped_column(String(24))
+    source_name: Mapped[str | None] = mapped_column(String(200))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    source_excerpt: Mapped[str | None] = mapped_column(Text)
+    own_summary: Mapped[str | None] = mapped_column(Text)
+    content_markdown: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("''")
+    )
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    index_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    fund_codes: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('长期', '实时')",
+            name="ck_investment_note_category",
+        ),
+        CheckConstraint(
+            "action IS NULL OR action IN ('加仓', '减仓', '清仓', '持有', '观察')",
+            name="ck_investment_note_action",
+        ),
+        Index("ix_investment_note_user_date", "user_id", "note_date"),
+    )
+
+
 class FundListing(Base, TimestampMixin, ProvenanceMixin):
     __tablename__ = "fund_listing"
 

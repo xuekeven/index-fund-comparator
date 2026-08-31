@@ -1,6 +1,8 @@
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 import json
 from urllib.parse import unquote
 
@@ -31,6 +33,8 @@ from app.sync.csrc_funds import (
     SummaryShare,
     snapshot_date_from_url,
     subscription_documents,
+    SubscriptionState,
+    sync_subscription_state,
 )
 
 
@@ -461,6 +465,118 @@ def test_preserves_pdf_table_columns_for_equal_subscription_limits() -> None:
         ("018064", Decimal("100")),
         ("018065", Decimal("100")),
     ]
+
+
+def test_repeated_class_labels_select_every_named_share_class() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("016055", "博时纳斯达克100联接A人民币", "A", "人民币", None),
+            SummaryShare("016056", "博时纳斯达克100联接A美元现汇", "A", "美元", "现汇"),
+            SummaryShare("016057", "博时纳斯达克100联接C人民币", "C", "人民币", None),
+            SummaryShare("016058", "博时纳斯达克100联接C美元现汇", "C", "美元", "现汇"),
+            SummaryShare("024237", "博时纳斯达克100联接I人民币", "I", "人民币", None),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "博时纳斯达克100ETF联接（QDII）A类、C类份额暂停申购业务的公告",
+        "公告送出日期2025年9月27日，自2025年9月29日起暂停申购",
+        shares,
+        "https://example.test/ac-suspended.pdf",
+    )
+
+    assert [(state.code, state.status) for state in states] == [
+        ("016055", "suspended"),
+        ("016056", "suspended"),
+        ("016057", "suspended"),
+        ("016058", "suspended"),
+    ]
+
+
+def test_currency_scoped_announcement_does_not_override_usd_share() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("018064", "华夏标普500ETF发起式联接A（人民币）", "A", "人民币", None),
+            SummaryShare("018065", "华夏标普500ETF发起式联接C（人民币）", "C", "人民币", None),
+            SummaryShare("018066", "华夏标普500ETF发起式联接A（美元现汇）", "A", "美元", "现汇"),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "关于调整华夏标普500ETF发起式联接（QDII）人民币申购业务上限的公告",
+        "公告送出日期2026年8月1日，自2026年8月3日起，"
+        "涉及基金份额类别的交易代码018064018065018066，"
+        "调整人民币申购业务上限。",
+        shares,
+        "https://example.test/rmb-limit.pdf",
+    )
+
+    assert [(state.code, state.status) for state in states] == [
+        ("018064", "limited"),
+        ("018065", "limited"),
+    ]
+
+
+def test_authoritative_subscription_sync_reopens_correct_older_state() -> None:
+    correct_state = SimpleNamespace(
+        id=1,
+        channel="全部渠道",
+        effective_from=datetime(2025, 11, 24, tzinfo=ZoneInfo("Asia/Shanghai")),
+        effective_to=datetime(2026, 8, 3, tzinfo=ZoneInfo("Asia/Shanghai")),
+        limit_status="suspended",
+        limit_amount=None,
+        currency="美元",
+        source_url="https://example.test/pause.pdf",
+        source_time=None,
+        collected_at=datetime(2026, 8, 1, tzinfo=UTC),
+        quality_status="verified",
+    )
+    incorrect_state = SimpleNamespace(
+        id=2,
+        channel="基金管理人直销电子交易平台",
+        effective_from=datetime(2026, 8, 3, tzinfo=ZoneInfo("Asia/Shanghai")),
+        effective_to=None,
+        limit_status="limited",
+        limit_amount=None,
+        currency="美元",
+        source_url="https://example.test/rmb-limit.pdf",
+        source_time=None,
+        collected_at=datetime(2026, 8, 3, tzinfo=UTC),
+        quality_status="verified",
+    )
+
+    class StubSession:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        def scalars(self, _statement: object) -> list[SimpleNamespace]:
+            return [incorrect_state, correct_state]
+
+        def add(self, record: object) -> None:
+            self.added.append(record)
+
+    session = StubSession()
+    collected_at = datetime(2026, 8, 31, tzinfo=UTC)
+    sync_subscription_state(
+        session, 123,
+        SubscriptionState(
+            code="018066",
+            status="suspended",
+            limit_amount=None,
+            currency="美元",
+            effective_date=date(2025, 11, 24),
+            source_url="https://example.test/pause.pdf",
+        ),
+        collected_at,
+        authoritative=True,
+    )
+
+    assert correct_state.effective_to is None
+    assert correct_state.collected_at == collected_at
+    assert incorrect_state.effective_to == incorrect_state.effective_from
+    assert session.added == []
 
 
 def test_resolves_subscription_state_by_effective_date_not_document_order() -> None:

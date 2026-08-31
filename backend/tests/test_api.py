@@ -154,6 +154,59 @@ def test_single_user_fund_tags_validate_tag_and_fund() -> None:
     assert missing_fund.status_code == 404
 
 
+def test_investment_notes_round_trip() -> None:
+    created = client.post(
+        "/api/v1/notes",
+        json={
+            "noteDate": "2026-08-30",
+            "title": "标普500观察",
+            "category": "实时",
+            "action": "观察",
+            "sourceName": "自己总结",
+            "sourceExcerpt": "等待确认方向",
+            "ownSummary": "不追涨，分批处理。",
+            "contentMarkdown": "- 观察波动\n- 记录失效条件",
+            "tags": ["标普500", "风控"],
+            "indexIds": ["sp-500"],
+            "fundCodes": ["513500"],
+        },
+    )
+    assert created.status_code == 201
+    note_id = created.json()["id"]
+
+    listed = client.get("/api/v1/notes", params={"q": "风控", "year": 2026})
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [note_id]
+
+    updated_payload = {
+        **created.json(),
+        "title": "标普500观察（已复盘）",
+        "action": "减仓",
+    }
+    updated = client.put(f"/api/v1/notes/{note_id}", json=updated_payload)
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "标普500观察（已复盘）"
+    assert updated.json()["action"] == "减仓"
+
+    deleted = client.delete(f"/api/v1/notes/{note_id}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+    assert client.put(f"/api/v1/notes/{note_id}", json=updated_payload).status_code == 404
+
+
+def test_investment_notes_validate_category_and_action() -> None:
+    response = client.post(
+        "/api/v1/notes",
+        json={
+            "noteDate": "2026-08-30",
+            "title": "非法笔记",
+            "category": "其他",
+            "action": "梭哈",
+        },
+    )
+    assert response.status_code == 422
+
+
 def test_filter_exchange_with_repeated_query_parameters() -> None:
     response = client.get(
         "/api/v1/indices/csi-500/funds",

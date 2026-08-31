@@ -117,6 +117,48 @@ class FundTagResponse(ApiModel):
     tags: list[FundTagType]
 
 
+class InvestmentNoteCategory(str, Enum):
+    LONG_TERM = "长期"
+    REAL_TIME = "实时"
+
+
+class InvestmentNoteAction(str, Enum):
+    ADD = "加仓"
+    REDUCE = "减仓"
+    CLEAR = "清仓"
+    HOLD = "持有"
+    WATCH = "观察"
+
+
+class InvestmentNotePayload(ApiModel):
+    note_date: date
+    title: str = Field(min_length=1, max_length=200)
+    category: InvestmentNoteCategory
+    action: InvestmentNoteAction | None = None
+    source_name: str | None = Field(default=None, max_length=200)
+    source_url: str | None = None
+    source_excerpt: str | None = None
+    own_summary: str | None = None
+    content_markdown: str = ""
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    index_ids: list[str] = Field(default_factory=list, max_length=20)
+    fund_codes: list[str] = Field(default_factory=list, max_length=100)
+
+
+class InvestmentNoteCreate(InvestmentNotePayload):
+    pass
+
+
+class InvestmentNoteUpdate(InvestmentNotePayload):
+    pass
+
+
+class InvestmentNoteItem(InvestmentNotePayload):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class FundListResponse(ApiModel):
     index: IndexSummary
     items: list[FundComparisonRow]

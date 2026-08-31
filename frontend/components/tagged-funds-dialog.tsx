@@ -16,6 +16,24 @@ interface TaggedFundsDialogProps {
   onRetry: () => void;
 }
 
+function SubscriptionLimit({ fund }: { fund: FundComparisonRow }) {
+  if (fund.tradingVenue !== "场外" || fund.subscriptionStatus === null) {
+    return <span className="tagged-limit-muted">—</span>;
+  }
+  if (fund.subscriptionStatus === "suspended") {
+    return <span className="subscription-tag suspended">暂停申购</span>;
+  }
+  if (fund.subscriptionStatus === "open") {
+    return <span className="subscription-tag open">开放申购</span>;
+  }
+  const amount = fund.subscriptionLimitAmount;
+  const unit = fund.subscriptionLimitCurrency === "美元" ? "美元" : "元";
+  const label = amount === null
+    ? "限额申购"
+    : `限额${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(amount)}${unit}`;
+  return <span className="subscription-tag limited">{label}</span>;
+}
+
 export function TaggedFundsDialog({
   tag,
   funds,
@@ -101,11 +119,12 @@ export function TaggedFundsDialog({
                 <table className="tagged-funds-table">
                   <thead>
                     <tr>
+                      <th>跟踪指数</th>
                       <th>基金代码</th>
                       <th>基金份额</th>
-                      <th>跟踪指数</th>
                       <th>类型</th>
                       <th>币种</th>
+                      <th>申购限额</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -113,6 +132,7 @@ export function TaggedFundsDialog({
                       const detailUrl = getFundDetailUrl(fund);
                       return (
                         <tr key={fund.id}>
+                          <td><strong>{indexNames[fund.indexId] ?? fund.indexId}</strong></td>
                           <td>
                             {detailUrl ? (
                               <a
@@ -130,12 +150,12 @@ export function TaggedFundsDialog({
                             <strong>{fund.displayName}</strong>
                             <small>{fund.fundCompany}</small>
                           </td>
-                          <td>{indexNames[fund.indexId] ?? fund.indexId}</td>
                           <td>
                             {fund.tradingVenue}
                             {fund.exchange ? <small>{fund.exchange}</small> : null}
                           </td>
                           <td>{fund.currency}</td>
+                          <td><SubscriptionLimit fund={fund} /></td>
                         </tr>
                       );
                     })}

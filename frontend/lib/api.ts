@@ -4,6 +4,8 @@ import type {
   FundTag,
   FundTagResponse,
   IndexSummary,
+  InvestmentNote,
+  InvestmentNotePayload,
   TradingVenue,
 } from "./types";
 
@@ -46,6 +48,28 @@ async function putJson<T>(path: string, body: unknown): Promise<T> {
   });
   if (!response.ok) {
     throw new Error(`API request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function sendJson<T>(
+  path: string,
+  method: "POST" | "PUT" | "DELETE",
+  body?: unknown,
+): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method,
+    headers: {
+      Accept: "application/json",
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (!response.ok) {
+    const responseBody = await response.json().catch(() => null) as {
+      detail?: string;
+    } | null;
+    throw new Error(responseBody?.detail ?? `API request failed: ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
@@ -104,4 +128,28 @@ export function getSyncTasks(signal?: AbortSignal): Promise<SyncTaskSnapshot> {
 
 export function startSyncTask(task: SyncTaskKey): Promise<SyncTaskSnapshot> {
   return postJson<SyncTaskSnapshot>(`/sync-tasks/${task}`);
+}
+
+
+export function getInvestmentNotes(
+  signal?: AbortSignal,
+): Promise<InvestmentNote[]> {
+  return getJson<InvestmentNote[]>("/notes", signal);
+}
+
+export function createInvestmentNote(
+  payload: InvestmentNotePayload,
+): Promise<InvestmentNote> {
+  return sendJson<InvestmentNote>("/notes", "POST", payload);
+}
+
+export function updateInvestmentNote(
+  noteId: number,
+  payload: InvestmentNotePayload,
+): Promise<InvestmentNote> {
+  return sendJson<InvestmentNote>(`/notes/${noteId}`, "PUT", payload);
+}
+
+export function deleteInvestmentNote(noteId: number): Promise<{ deleted: boolean }> {
+  return sendJson<{ deleted: boolean }>(`/notes/${noteId}`, "DELETE");
 }
