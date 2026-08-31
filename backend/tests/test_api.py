@@ -88,6 +88,23 @@ def test_sync_task_status_and_start(monkeypatch) -> None:
     assert response.json()["activeJob"] == "D"
 
 
+def test_sync_task_history(monkeypatch) -> None:
+    history = [
+        {
+            "time": "2026-08-31T01:00:00+00:00",
+            "result": "succeeded",
+            "method": "scheduled",
+        }
+    ]
+    monkeypatch.setattr(sync_job_runner, "history", lambda task: history)
+
+    response = client.get("/api/v1/sync-tasks/F/history")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": history}
+    assert client.get("/api/v1/sync-tasks/unknown/history").status_code == 422
+
+
 def test_sync_task_rejects_unknown_or_overlapping_job(monkeypatch) -> None:
     assert client.post("/api/v1/sync-tasks/unknown").status_code == 422
 
@@ -114,6 +131,15 @@ def test_filter_funds_by_venue() -> None:
     body = response.json()
     assert body["total"] == 2
     assert body["lastSyncedAt"] is None
+    assert body["dataFreshness"] == {
+        "master": None,
+        "nav": None,
+        "quote": None,
+        "fee": None,
+        "scale": None,
+        "metric": None,
+        "subscription": None,
+    }
     assert all(item["tradingVenue"] == "场外" for item in body["items"])
     assert all(item["tags"] == [] for item in body["items"])
 

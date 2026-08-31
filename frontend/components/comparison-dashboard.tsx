@@ -18,7 +18,12 @@ import {
   VENUES,
 } from "@/lib/fund-list";
 import type { FundSortKey, SortDirection, VenueFilter } from "@/lib/fund-list";
-import type { FundComparisonRow, FundTag, IndexSummary } from "@/lib/types";
+import type {
+  DataFreshness,
+  FundComparisonRow,
+  FundTag,
+  IndexSummary,
+} from "@/lib/types";
 import { CloseIcon, MarkIcon, SearchIcon } from "./icons";
 import { ComparisonView } from "./comparison-view";
 import { FundCards, FundTable } from "./fund-table";
@@ -30,7 +35,17 @@ import { TaggedFundsDialog } from "./tagged-funds-dialog";
 
 type CachedFunds = {
   items: FundComparisonRow[];
-  lastSyncedAt: Date | null;
+  dataFreshness: DataFreshness;
+};
+
+const EMPTY_FRESHNESS: DataFreshness = {
+  master: null,
+  nav: null,
+  quote: null,
+  fee: null,
+  scale: null,
+  metric: null,
+  subscription: null,
 };
 
 const INDEX_ORDER: Record<string, number> = {
@@ -57,7 +72,7 @@ function fundCacheKey(
   return `${indexId}|${venue}|${exchangeKey}`;
 }
 
-function formatSyncTime(value: Date | null) {
+function formatSyncTime(value: string | null) {
   if (!value) return "尚未同步";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
@@ -65,7 +80,7 @@ function formatSyncTime(value: Date | null) {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).format(value);
+  }).format(new Date(value));
 }
 
 function formatTradeDate(value: string | null) {
@@ -166,7 +181,7 @@ export function ComparisonDashboard() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+  const [dataFreshness, setDataFreshness] = useState<DataFreshness>(EMPTY_FRESHNESS);
   const [comparisonOpen, setComparisonOpen] = useState(false);
   const [comparisonFunds, setComparisonFunds] = useState<FundComparisonRow[]>([]);
   const [comparisonWarnings, setComparisonWarnings] = useState<string[]>([]);
@@ -212,7 +227,7 @@ export function ComparisonDashboard() {
     if (cached && !force) {
       if (fundRequestId.current === requestId) {
         setFunds(cached.items);
-        setLastSyncedAt(cached.lastSyncedAt);
+        setDataFreshness(cached.dataFreshness);
         setError(null);
         setLoading(false);
       }
@@ -228,14 +243,13 @@ export function ComparisonDashboard() {
         selectedVenue === "场内" ? selectedExchanges : [],
         signal,
       );
-      const syncedAt = response.lastSyncedAt ? new Date(response.lastSyncedAt) : null;
       fundCache.current.set(cacheKey, {
         items: response.items,
-        lastSyncedAt: syncedAt,
+        dataFreshness: response.dataFreshness,
       });
       if (fundRequestId.current === requestId) {
         setFunds(response.items);
-        setLastSyncedAt(syncedAt);
+        setDataFreshness(response.dataFreshness);
       }
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === "AbortError") return;
@@ -360,6 +374,10 @@ export function ComparisonDashboard() {
     () => calculateQdiiPurchaseLimits(visibleFunds),
     [visibleFunds],
   );
+  const primaryFreshness = venue === "场内"
+    ? dataFreshness.quote
+    : dataFreshness.nav;
+  const primaryFreshnessLabel = venue === "场内" ? "行情采集" : "净值采集";
 
   const sortedFunds = useMemo(
     () => sortFundRows(visibleFunds, sortKey, sortDirection),
@@ -379,7 +397,7 @@ export function ComparisonDashboard() {
     setLoading(!cached);
     if (cached) {
       setFunds(cached.items);
-      setLastSyncedAt(cached.lastSyncedAt);
+      setDataFreshness(cached.dataFreshness);
     }
     setActiveIndex(indexId);
     setVenue("场内");
@@ -732,8 +750,8 @@ export function ComparisonDashboard() {
               </p>
               <p className="fund-last-synced">
                 <span className="status-dot" />
-                <span>同步时间</span>
-                <strong>{formatSyncTime(lastSyncedAt)}</strong>
+                <span>{primaryFreshnessLabel}</span>
+                <strong>{formatSyncTime(primaryFreshness)}</strong>
               </p>
               <p className="fund-trade-date">
                 <span className="status-dot" />
@@ -846,7 +864,9 @@ export function ComparisonDashboard() {
           onRetry={() => void openTaggedFunds(taggedDialogTag)}
         />
       )}
-      {syncInfoOpen && <SyncInfoDialog onClose={closeSyncInfo} />}
+      {syncInfoOpen && (
+        <SyncInfoDialog dataFreshness={dataFreshness} onClose={closeSyncInfo} />
+      )}
       {shareClassHelpOpen && (
         <ShareClassHelpDialog onClose={closeShareClassHelp} />
       )}

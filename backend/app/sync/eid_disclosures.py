@@ -15,6 +15,19 @@ from app.database_models import FeeHistory
 
 
 PRODUCT_SUMMARY_LABEL = "基金产品资料概要"
+EID_BASE_URL = "http://eid.csrc.gov.cn/fund/disclose"
+EID_VALIDATE_URL = f"{EID_BASE_URL}/validate_fund.do"
+EID_DETAIL_URL = f"{EID_BASE_URL}/fund_detail.do"
+FEE_SECTION_LABELS = (
+    "管理费",
+    "托管费",
+    "销售服务费",
+    "审计费用",
+    "信息披露费",
+    "其他费用",
+    "基金运作综合费用测算",
+    "基金运作综合费率",
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,29 @@ def fetch_disclosure_text(
     return extract_pdf_text(response.content)
 
 
+def fetch_latest_product_summary_rates(
+    client: httpx.Client,
+    code: str,
+) -> tuple[dict[str, Decimal], str]:
+    validation = client.post(EID_VALIDATE_URL, data={"cFundCode": code})
+    validation.raise_for_status()
+    payload = validation.json()
+    if not payload.get("isSuccess") or not payload.get("fundId"):
+        raise RuntimeError(f"EID did not recognize fund code {code}")
+
+    detail = client.get(EID_DETAIL_URL, params={"fundId": int(payload["fundId"])})
+    detail.raise_for_status()
+    documents = disclosure_documents(
+        detail.text,
+        PRODUCT_SUMMARY_LABEL,
+        base_url=EID_DETAIL_URL,
+    )
+    if not documents:
+        raise RuntimeError(f"No fund product summary found for {code}")
+    document = documents[0]
+    return parse_fee_rates(fetch_disclosure_text(client, document)), document.url
+
+
 def parse_fee_rates(
     text: str,
     *,
@@ -80,9 +116,22 @@ def parse_fee_rates(
         labels["sales_service"] = "销售服务费"
     rates: dict[str, Decimal] = {}
     for fee_type, label in labels.items():
+        label_start = compact.find(label)
+        if label_start < 0:
+            continue
+        value_start = label_start + len(label)
+        value_end = min(
+            (
+                position
+                for boundary in FEE_SECTION_LABELS
+                if boundary != label
+                and (position := compact.find(boundary, value_start)) >= 0
+            ),
+            default=len(compact),
+        )
         match = re.search(
-            rf"{label}.{{0,400}}?([0-9]+(?:\.[0-9]+)?)%",
-            compact,
+            r"([0-9]+(?:\.[0-9]+)?)%",
+            compact[value_start:value_end],
         )
         if match:
             rates[fee_type] = Decimal(match.group(1))
@@ -92,6 +141,13 @@ def parse_fee_rates(
         )
     if include_sales_service:
         rates.setdefault("sales_service", Decimal("0"))
+    comprehensive_match = re.search(
+        r"基金运作综合费率(?:[（(]年化[）)])?.{0,120}?"
+        r"([0-9]+(?:\.[0-9]+)?)%",
+        compact,
+    )
+    if comprehensive_match:
+        rates["comprehensive_operating"] = Decimal(comprehensive_match.group(1))
     return rates
 
 

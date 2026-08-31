@@ -10,6 +10,23 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: index_fund_comparator_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/index_fund_comparator_test
+      IFC_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/index_fund_comparator_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -19,7 +36,13 @@ jobs:
       - working-directory: backend
         run: uv sync --extra dev --locked
       - working-directory: backend
-        run: uv run pytest -q
+        run: uv run alembic upgrade head
+      - working-directory: backend
+        run: uv run alembic check
+      - working-directory: backend
+        run: uv run ruff check app tests
+      - working-directory: backend
+        run: uv run pytest -q --cov=app --cov-report=term-missing --cov-fail-under=55
       - run: bash deploy/test-manage-crontab.sh
 
   frontend:

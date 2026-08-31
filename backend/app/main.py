@@ -103,15 +103,17 @@ def list_index_funds(
     if structure:
         funds = [fund for fund in funds if fund.product_structure.value == structure]
 
+    freshness = repository.get_data_freshness(
+        index_id,
+        venue=venue,
+        exchanges=tuple(exchange or ()),
+    )
     return FundListResponse(
         index=index,
         items=funds,
         total=len(funds),
-        last_synced_at=repository.get_last_synced_at(
-            index_id,
-            venue=venue,
-            exchanges=tuple(exchange or ()),
-        ),
+        last_synced_at=freshness.latest_at,
+        data_freshness=freshness,
         generated_at=datetime.now(UTC),
         data_mode=settings.data_mode,
     )
@@ -240,6 +242,11 @@ def delete_investment_note(
 @app.get(f"{settings.api_prefix}/sync-tasks")
 def get_sync_tasks() -> dict[str, object]:
     return sync_job_runner.snapshot()
+
+
+@app.get(f"{settings.api_prefix}/sync-tasks/{{task}}/history")
+def get_sync_task_history(task: SyncTaskKey) -> dict[str, object]:
+    return {"items": sync_job_runner.history(task)}
 
 
 @app.post(f"{settings.api_prefix}/sync-tasks/{{task}}", status_code=202)

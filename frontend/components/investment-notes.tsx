@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
@@ -80,15 +80,28 @@ function formatNoteDate(value: string) {
 }
 
 function NoteText({ text }: { text: string }) {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
-  if (!lines.length) return null;
+  const normalized = text.trim();
+  if (!normalized) return null;
+  const lines = normalized.split(/\r?\n/);
   return (
     <div className="note-text">
-      {lines.map((line, index) => line.startsWith("- ") ? (
-        <p className="note-bullet" key={line + "-" + index}>{line.slice(2)}</p>
-      ) : (
-        <p key={line + "-" + index}>{line}</p>
-      ))}
+      {lines.map((line, index) => {
+        const content = line.trim();
+        const heading = content.match(/^(#{1,3})\s+(.+)$/);
+        const key = content + "-" + index;
+        if (!content) return <span className="note-text-break" aria-hidden="true" key={key} />;
+        if (heading) {
+          const level = heading[1].length;
+          if (level === 1) return <h3 className="note-text-heading level-1" key={key}>{heading[2]}</h3>;
+          if (level === 2) return <h4 className="note-text-heading level-2" key={key}>{heading[2]}</h4>;
+          return <h5 className="note-text-heading level-3" key={key}>{heading[2]}</h5>;
+        }
+        return content.startsWith("- ") ? (
+          <p className="note-bullet" key={key}>{content.slice(2)}</p>
+        ) : (
+          <p key={key}>{content}</p>
+        );
+      })}
     </div>
   );
 }
@@ -191,7 +204,15 @@ function NoteReader({ note, active, saving, onEdit, onDelete }: NoteReaderProps)
     <section id={`note-reader-${note.id}`} className={`note-reader ${active ? "active" : ""}`}>
       <header className="note-reader-head">
         <div>
-          <div className="note-meta-line"><span>{formatNoteDate(note.noteDate).full}</span><i>{note.category}</i>{note.action && <i className="action">{note.action}</i>}</div>
+          <div className="note-meta-line">
+            <span>{formatNoteDate(note.noteDate).full}</span>
+            {note.sourceName && (
+              <span className="note-meta-source">
+                {note.sourceUrl ? <a href={note.sourceUrl} target="_blank" rel="noreferrer">{note.sourceName}</a> : <strong>{note.sourceName}</strong>}
+              </span>
+            )}
+            {note.action && <i className="action">{note.action}</i>}
+          </div>
           <div className="note-title-row">
             <h2><mark>{note.title}</mark></h2>
             {note.tags.length > 0 && <div className="note-relations note-title-tags">{note.tags.map((tag) => <span key={"tag-" + tag}>#{tag}</span>)}</div>}
@@ -202,11 +223,6 @@ function NoteReader({ note, active, saving, onEdit, onDelete }: NoteReaderProps)
           <button className="danger" type="button" disabled={saving} onClick={() => onDelete(note)}>删除</button>
         </div>
       </header>
-      {note.sourceName && (
-        <div className="note-context-row">
-          <div className="note-source-inline"><span>来源</span>{note.sourceUrl ? <a href={note.sourceUrl} target="_blank" rel="noreferrer">{note.sourceName}</a> : <strong>{note.sourceName}</strong>}</div>
-        </div>
-      )}
       {note.sourceExcerpt && <section className="note-opinion-card"><span>观点归纳</span><NoteText text={note.sourceExcerpt} /></section>}
       {note.sourceName !== "自我总结" && note.ownSummary && <section className="note-summary-card"><span>自我总结</span><NoteText text={note.ownSummary} /></section>}
       {note.contentMarkdown && <section className="note-body-card"><h3>观察计划</h3><NoteText text={note.contentMarkdown} /></section>}
@@ -218,14 +234,19 @@ export function InvestmentNotes() {
   const [notes, setNotes] = useState<InvestmentNote[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [query, setQuery] = useState("");
-  const [category, setCategory] = useState<InvestmentNoteCategory | "全部">("全部");
+  const [category, setCategory] = useState<InvestmentNoteCategory>("长期");
   const [year, setYear] = useState("全部");
+  const [source, setSource] = useState("全部");
   const [openSelect, setOpenSelect] = useState<string | null>(null);
   const [editing, setEditing] = useState<"new" | number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<InvestmentNote | null>(null);
+  const [pendingScrollId, setPendingScrollId] = useState<number | null>(null);
   const [draft, setDraft] = useState<NoteDraft>(emptyDraft);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const deleteConfirmRef = useRef<HTMLButtonElement>(null);
+  const notePanelRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -254,16 +275,55 @@ export function InvestmentNotes() {
     return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
   }, [openSelect]);
 
+  useEffect(() => {
+    if (editing === null) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving) {
+        setEditing(null);
+        setOpenSelect(null);
+      }
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [editing, saving]);
+
+  useEffect(() => {
+    if (deleteTarget === null) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving) setDeleteTarget(null);
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    deleteConfirmRef.current?.focus();
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [deleteTarget, saving]);
+
   const years = useMemo(
     () => Array.from(new Set(notes.map((note) => note.noteDate.slice(0, 4)))).sort().reverse(),
+    [notes],
+  );
+  const sources = useMemo(
+    () => Array.from(new Set(
+      notes.map((note) => note.sourceName).filter((value): value is string => Boolean(value)),
+    )).sort((left, right) => left.localeCompare(right, "zh-CN")),
     [notes],
   );
 
   const filteredNotes = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
     return notes.filter((note) => {
-      if (category !== "全部" && note.category !== category) return false;
+      if (note.category !== category) return false;
       if (year !== "全部" && !note.noteDate.startsWith(year)) return false;
+      if (source !== "全部" && note.sourceName !== source) return false;
       if (!normalizedQuery) return true;
       const searchable = [
         note.title, note.sourceName, note.sourceExcerpt, note.ownSummary,
@@ -271,7 +331,7 @@ export function InvestmentNotes() {
       ].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
       return searchable.includes(normalizedQuery);
     });
-  }, [category, notes, query, year]);
+  }, [category, notes, query, source, year]);
 
   const groupedNotes = useMemo(() => {
     const groups = new Map<string, InvestmentNote[]>();
@@ -285,39 +345,97 @@ export function InvestmentNotes() {
   const activeNote = filteredNotes.find((note) => note.id === activeId)
     ?? filteredNotes[0] ?? null;
 
+  useEffect(() => {
+    if (pendingScrollId === null || editing !== null) return;
+    const frame = window.requestAnimationFrame(() => {
+      const reader = document.getElementById(`note-reader-${pendingScrollId}`);
+      if (!reader) return;
+      reader.scrollIntoView({ behavior: "smooth", block: "start" });
+      document.getElementById(`note-timeline-${pendingScrollId}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      setPendingScrollId(null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editing, filteredNotes, pendingScrollId]);
+
+  useEffect(() => {
+    const panel = notePanelRef.current;
+    if (!panel || filteredNotes.length === 0) return;
+    let frame = 0;
+
+    const syncActiveNote = () => {
+      frame = 0;
+      const panelTop = panel.getBoundingClientRect().top;
+      const activationLine = panelTop + Math.min(100, panel.clientHeight * 0.2);
+      let nextId = filteredNotes[0].id;
+
+      for (const note of filteredNotes) {
+        const reader = document.getElementById(`note-reader-${note.id}`);
+        if (!reader || reader.getBoundingClientRect().top > activationLine) break;
+        nextId = note.id;
+      }
+      if (panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 2) {
+        nextId = filteredNotes[filteredNotes.length - 1].id;
+      }
+
+      setActiveId((current) => current === nextId ? current : nextId);
+      document.getElementById(`note-timeline-${nextId}`)
+        ?.scrollIntoView({ block: "nearest" });
+    };
+
+    const scheduleSync = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(syncActiveNote);
+    };
+
+    panel.addEventListener("scroll", scheduleSync, { passive: true });
+    scheduleSync();
+    return () => {
+      panel.removeEventListener("scroll", scheduleSync);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [filteredNotes]);
+
   function startNew() {
-    setDraft(emptyDraft()); setEditing("new"); setError(null);
+    setDraft(emptyDraft()); setEditing("new"); setOpenSelect(null); setError(null);
   }
 
   function startEdit(note: InvestmentNote) {
-    setDraft(noteToDraft(note)); setEditing(note.id); setError(null);
+    setDraft(noteToDraft(note)); setEditing(note.id); setOpenSelect(null); setError(null);
   }
 
   async function saveNote(event: FormEvent) {
     event.preventDefault();
     const payload = draftToPayload(draft);
     if (!payload.title) { setError("请填写笔记标题。"); return; }
+    const isNewNote = editing === "new";
     setSaving(true); setError(null);
     try {
-      const saved = editing === "new"
+      const saved = isNewNote
         ? await createInvestmentNote(payload)
         : await updateInvestmentNote(editing as number, payload);
       setNotes((current) => [
         saved, ...current.filter((note) => note.id !== saved.id),
       ].sort((left, right) => right.noteDate.localeCompare(left.noteDate) || right.id - left.id));
       setActiveId(saved.id); setEditing(null);
+      if (isNewNote) {
+        setCategory(saved.category);
+        setYear("全部");
+        setSource("全部");
+        setQuery("");
+        setPendingScrollId(saved.id);
+      }
     } catch {
       setError("保存失败，请检查数据服务后重试。");
     } finally { setSaving(false); }
   }
 
   async function removeNote(note: InvestmentNote) {
-    if (!window.confirm("确认删除“" + note.title + "”吗？")) return;
     setSaving(true); setError(null);
     try {
       await deleteInvestmentNote(note.id);
       setNotes((current) => current.filter((item) => item.id !== note.id));
-      setActiveId(null); setEditing(null);
+      setActiveId(null); setEditing(null); setDeleteTarget(null);
     } catch {
       setError("删除失败，请稍后重试。");
     } finally { setSaving(false); }
@@ -338,12 +456,8 @@ export function InvestmentNotes() {
         </header>
 
         <div className="notes-toolbar">
-          <label className="notes-search">
-            <SearchIcon />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题、来源、正文或标签" />
-          </label>
           <div className="notes-category-filter" aria-label="笔记类型">
-            {(["全部", ...CATEGORY_OPTIONS] as const).map((item) => (
+            {CATEGORY_OPTIONS.map((item) => (
               <button key={item} className={category === item ? "active" : ""} type="button" onClick={() => setCategory(item)}>{item}</button>
             ))}
           </div>
@@ -351,11 +465,24 @@ export function InvestmentNotes() {
             id="note-year"
             label="年份"
             value={year}
-            options={[[ "全部", "全部年份" ] as const, ...years.map((item) => [item, item + "年"] as const)]}
+            options={[[ "全部", "全部" ] as const, ...years.map((item) => [item, item + "年"] as const)]}
             open={openSelect === "year"}
             onOpenChange={(open) => setOpenSelect(open ? "year" : null)}
             onChange={setYear}
           />
+          <NoteSelect
+            id="note-source-filter"
+            label="来源"
+            value={source}
+            options={[[ "全部", "全部" ] as const, ...sources.map((item) => [item, item] as const)]}
+            open={openSelect === "source-filter"}
+            onOpenChange={(open) => setOpenSelect(open ? "source-filter" : null)}
+            onChange={setSource}
+          />
+          <label className="notes-search">
+            <SearchIcon />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题、来源、正文或标签" />
+          </label>
         </div>
 
         <div className="notes-layout">
@@ -368,12 +495,11 @@ export function InvestmentNotes() {
                   {items.map((note) => {
                     const formatted = formatNoteDate(note.noteDate);
                     return (
-                      <button key={note.id} className={activeNote?.id === note.id ? "active" : ""} type="button" onClick={() => {
+                      <button id={`note-timeline-${note.id}`} key={note.id} className={activeNote?.id === note.id ? "active" : ""} type="button" onClick={() => {
                           setActiveId(note.id); setEditing(null); setError(null);
                           window.requestAnimationFrame(() => document.getElementById("note-reader-" + note.id)?.scrollIntoView({ behavior: "smooth", block: "start" }));
                         }}>
                         <span>{formatted.short}</span><strong>{note.title}</strong>
-                        <small>{note.category + (note.action ? " · " + note.action : "")}</small>
                       </button>
                     );
                   })}
@@ -383,36 +509,21 @@ export function InvestmentNotes() {
             </div>
           </aside>
 
-          <article className="note-panel">
-            {error && <p className="notes-error" role="alert">{error}</p>}
+          <article ref={notePanelRef} className="note-panel">
+            {error && editing === null && <p className="notes-error" role="alert">{error}</p>}
             {loading ? (
               <div className="note-empty-state"><span className="spinner" /><p>正在加载笔记…</p></div>
-            ) : editing !== null ? (
-              <form className="note-editor" onSubmit={saveNote}>
-                <div className="note-editor-head">
-                  <div><span className="section-kicker">{editing === "new" ? "创建记录" : "修改记录"}</span><h2>{editing === "new" ? "新建投资笔记" : "编辑投资笔记"}</h2></div>
-                  <button type="button" onClick={() => setEditing(null)}>取消</button>
-                </div>
-                <div className="note-form-grid">
-                  <div className="note-form-control"><span>日期</span><NoteDateField value={draft.noteDate} open={openSelect === "date"} onOpenChange={(open) => setOpenSelect(open ? "date" : null)} onChange={(value) => setDraft({ ...draft, noteDate: value })} /></div>
-                  <label><span>标题</span><input required maxLength={200} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：07-21 加减仓" /></label>
-                  <div className="note-form-control"><span>类型</span><NoteSelect id="note-category" value={draft.category} options={CATEGORY_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "category"} onOpenChange={(open) => setOpenSelect(open ? "category" : null)} onChange={(value) => setDraft({ ...draft, category: value as InvestmentNoteCategory })} /></div>
-                  <div className="note-form-control"><span>行动观点</span><NoteSelect id="note-action" value={draft.action ?? ""} options={[[ "", "暂无" ] as const, ...ACTION_OPTIONS.map((item) => [item, item] as const)]} open={openSelect === "action"} onOpenChange={(open) => setOpenSelect(open ? "action" : null)} onChange={(value) => setDraft({ ...draft, action: value ? value as InvestmentNoteAction : null })} /></div>
-                  <div className="note-form-control"><span>来源</span><NoteSelect id="note-source" value={draft.sourceName ?? ""} options={SOURCE_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "source"} onOpenChange={(open) => setOpenSelect(open ? "source" : null)} onChange={(value) => setDraft({ ...draft, sourceName: value, ownSummary: value === "自我总结" ? "" : draft.ownSummary })} /></div>
-                  <label><span>来源链接</span><input value={draft.sourceUrl ?? ""} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} placeholder="https://…" /></label>
-                </div>
-                <label className="note-form-field"><span>观点归纳</span><textarea rows={4} value={draft.sourceExcerpt ?? ""} onChange={(event) => setDraft({ ...draft, sourceExcerpt: event.target.value })} placeholder="每行可用“- ”开头记录一个观点" /></label>
-                {draft.sourceName !== "自我总结" && <label className="note-form-field"><span>自我总结</span><textarea rows={4} value={draft.ownSummary ?? ""} onChange={(event) => setDraft({ ...draft, ownSummary: event.target.value })} placeholder="写下自己的判断、依据和失效条件" /></label>}
-                <label className="note-form-field"><span>观察计划</span><textarea rows={5} value={draft.contentMarkdown} onChange={(event) => setDraft({ ...draft, contentMarkdown: event.target.value })} placeholder="交易计划、复盘结果或后续观察…" /></label>
-                <div className="note-form-grid note-form-grid-single">
-                  <label><span>标签</span><input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="QDII、风控、估值" /></label>
-                </div>
-                <div className="note-editor-actions"><button type="button" onClick={() => setEditing(null)}>取消</button><button className="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存笔记"}</button></div>
-              </form>
             ) : filteredNotes.length > 0 ? (
               <div className="note-reader-list">
                 {filteredNotes.map((note) => (
-                  <NoteReader key={note.id} note={note} active={activeNote?.id === note.id} saving={saving} onEdit={startEdit} onDelete={(item) => void removeNote(item)} />
+                  <NoteReader
+                    key={note.id}
+                    note={note}
+                    active={activeNote?.id === note.id}
+                    saving={saving}
+                    onEdit={startEdit}
+                    onDelete={(item) => { setDeleteTarget(item); setError(null); }}
+                  />
                 ))}
               </div>
             ) : (
@@ -421,6 +532,73 @@ export function InvestmentNotes() {
           </article>
         </div>
       </section>
+
+      {editing !== null && (
+        <div className="note-editor-overlay" role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !saving) {
+              setEditing(null);
+              setOpenSelect(null);
+            }
+          }}>
+            <div className="note-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="note-editor-title">
+              <form className="note-editor" onSubmit={saveNote}>
+                <div className="note-editor-head">
+                  <div><span className="section-kicker">{editing === "new" ? "创建记录" : "修改记录"}</span><h2 id="note-editor-title">{editing === "new" ? "新建投资笔记" : "编辑投资笔记"}</h2></div>
+                  <button type="button" disabled={saving} onClick={() => { setEditing(null); setOpenSelect(null); }}>取消</button>
+                </div>
+                {error && <p className="notes-error note-editor-error" role="alert">{error}</p>}
+                <div className="note-form-grid">
+                  <div className="note-form-control"><span>日期</span><NoteDateField value={draft.noteDate} open={openSelect === "date"} onOpenChange={(open) => setOpenSelect(open ? "date" : null)} onChange={(value) => setDraft({ ...draft, noteDate: value })} /></div>
+                  <label><span>标题</span><input required maxLength={200} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：07-21 加减仓" /></label>
+                  <div className="note-form-control"><span>类型</span><NoteSelect id="note-category" value={draft.category} options={CATEGORY_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "category"} onOpenChange={(open) => setOpenSelect(open ? "category" : null)} onChange={(value) => setDraft({ ...draft, category: value as InvestmentNoteCategory })} /></div>
+                  <div className="note-form-control"><span>行动观点</span><NoteSelect id="note-action" value={draft.action ?? ""} options={[[ "", "暂无" ] as const, ...ACTION_OPTIONS.map((item) => [item, item] as const)]} open={openSelect === "action"} onOpenChange={(open) => setOpenSelect(open ? "action" : null)} onChange={(value) => setDraft({ ...draft, action: value ? value as InvestmentNoteAction : null })} /></div>
+                  <div className="note-form-control"><span>来源</span><NoteSelect id="note-source" value={draft.sourceName ?? ""} options={SOURCE_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "source"} onOpenChange={(open) => setOpenSelect(open ? "source" : null)} onChange={(value) => setDraft({ ...draft, sourceName: value, ownSummary: value === "自我总结" ? "" : draft.ownSummary })} /></div>
+                  <label><span>来源链接</span><input value={draft.sourceUrl ?? ""} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} placeholder="https://…" /></label>
+                </div>
+                <label className="note-form-field"><span>观点归纳</span><textarea rows={3} value={draft.sourceExcerpt ?? ""} onChange={(event) => setDraft({ ...draft, sourceExcerpt: event.target.value })} placeholder="每行可用“- ”开头记录一个观点" /></label>
+                {draft.sourceName !== "自我总结" && <label className="note-form-field"><span>自我总结</span><textarea rows={3} value={draft.ownSummary ?? ""} onChange={(event) => setDraft({ ...draft, ownSummary: event.target.value })} placeholder="写下自己的判断、依据和失效条件" /></label>}
+                <label className="note-form-field"><span>观察计划</span><textarea rows={3} value={draft.contentMarkdown} onChange={(event) => setDraft({ ...draft, contentMarkdown: event.target.value })} placeholder="交易计划、复盘结果或后续观察…" /></label>
+                <div className="note-form-grid note-form-grid-single">
+                  <label><span>标签</span><input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="QDII、风控、估值" /></label>
+                </div>
+                <div className="note-editor-actions"><button type="button" disabled={saving} onClick={() => { setEditing(null); setOpenSelect(null); }}>取消</button><button className="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存笔记"}</button></div>
+              </form>
+            </div>
+        </div>
+      )}
+
+      {deleteTarget !== null && (
+        <div className="note-delete-overlay" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !saving) setDeleteTarget(null);
+        }}>
+          <section
+            className="note-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="note-delete-title"
+            aria-describedby="note-delete-description"
+          >
+            <span className="section-kicker">删除笔记</span>
+            <h2 id="note-delete-title">确认删除？</h2>
+            <p id="note-delete-description">
+              确认删除“{deleteTarget.title}”吗？删除后无法恢复。
+            </p>
+            {error && <p className="note-delete-error" role="alert">{error}</p>}
+            <div className="note-delete-actions">
+              <button type="button" disabled={saving} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button
+                ref={deleteConfirmRef}
+                className="danger"
+                type="button"
+                disabled={saving}
+                onClick={() => void removeNote(deleteTarget)}
+              >
+                {saving ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

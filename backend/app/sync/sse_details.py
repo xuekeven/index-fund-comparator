@@ -23,6 +23,11 @@ from app.database_models import (
     MarketQuote,
     NavDaily,
 )
+from app.sync.eid_disclosures import (
+    fetch_latest_product_summary_rates,
+    sync_fee_history,
+)
+from app.sync_history import run_tracked_sync
 from app.sync.sse_funds import (
     ASIA_SHANGHAI,
     SSE_FUND_BASE_INFO_SQL_ID,
@@ -31,9 +36,7 @@ from app.sync.sse_funds import (
     SSE_USER_AGENT,
     SseNavRecord,
     TARGETS,
-    parse_sse_fee_rates,
     sse_detail_url,
-    sync_fee_history,
     sync_nav_daily,
 )
 
@@ -56,6 +59,7 @@ logger = logging.getLogger(__name__)
 class SseDetailInfo:
     fee_rates: dict[str, Decimal]
     scale_yi: Decimal
+    fee_source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,8 +102,20 @@ def parse_sse_detail_info(payload: dict[str, Any]) -> SseDetailInfo:
     if scale_yi is None or scale_yi < 0:
         raise RuntimeError("SSE fund detail response did not contain a valid SCALE")
     return SseDetailInfo(
-        fee_rates=parse_sse_fee_rates(payload),
+        fee_rates={},
         scale_yi=scale_yi,
+    )
+
+
+def merge_product_summary_fee_rates(
+    detail: SseDetailInfo,
+    pdf_rates: dict[str, Decimal],
+    source_url: str,
+) -> SseDetailInfo:
+    return SseDetailInfo(
+        fee_rates=pdf_rates,
+        scale_yi=detail.scale_yi,
+        fee_source_url=source_url,
     )
 
 
@@ -212,7 +228,13 @@ def fetch_detail_info(
         headers={"Referer": detail_url},
     )
     response.raise_for_status()
-    return parse_sse_detail_info(response.json())
+    detail = parse_sse_detail_info(response.json())
+    try:
+        pdf_rates, source_url = fetch_latest_product_summary_rates(client, code)
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.warning("SSE %s product summary fee unavailable: %s", code, exc)
+        return detail
+    return merge_product_summary_fee_rates(detail, pdf_rates, source_url)
 
 
 def fetch_snapshot(
@@ -459,13 +481,14 @@ def run_sync(*, dry_run: bool = False) -> tuple[int, list[date]]:
                     )
 
                 with session.begin_nested():
-                    sync_fee_history(
-                        session,
-                        share_id,
-                        detail.fee_rates,
-                        collected_at,
-                        detail_url,
-                    )
+                    if detail.fee_rates and detail.fee_source_url is not None:
+                        sync_fee_history(
+                            session,
+                            share_id,
+                            detail.fee_rates,
+                            collected_at,
+                            detail.fee_source_url,
+                        )
                     sync_nav_daily(
                         session,
                         share_id,
@@ -540,4 +563,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_tracked_sync("B", main)

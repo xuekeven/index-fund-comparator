@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_session_factory
 from app.database_models import FundListing, FundProduct, FundShareClass, IndexDefinition
+from app.sync_history import run_tracked_sync
 from app.sync.csrc_funds import EID_DETAIL_URL, validate_fund_code
 from app.sync.eid_disclosures import (
     PRODUCT_SUMMARY_LABEL,
@@ -364,4 +365,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_tracked_sync("C", main)

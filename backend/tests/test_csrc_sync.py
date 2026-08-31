@@ -332,6 +332,83 @@ def test_product_summary_defaults_missing_sales_service_to_zero() -> None:
     assert summary.rates["sales_service"] == Decimal("0")
 
 
+def test_product_summary_does_not_confuse_comprehensive_rate_with_sales_service() -> None:
+    summary = parse_product_summary(
+        "基金简称摩根标普500指数(QDII)人民币A基金代码017641"
+        "管理费0.5%基金管理人和销售机构"
+        "托管费0.15%基金托管人"
+        "销售服务费－销售机构"
+        "审计费用60,000.00元会计师事务所"
+        "信息披露费120,000.00元规定披露报刊"
+        "其他费用按照国家有关规定列支"
+        "基金运作综合费用测算"
+        "基金运作综合费率（年化）0.66%"
+    )
+
+    assert summary.rates == {
+        "management": Decimal("0.5"),
+        "custody": Decimal("0.15"),
+        "sales_service": Decimal("0"),
+        "comprehensive_operating": Decimal("0.66"),
+    }
+
+
+def test_combined_product_summary_maps_share_specific_fees() -> None:
+    summary = parse_product_summary(
+        "基金简称万家纳斯达克100指数发起式(QDII)基金代码019441"
+        "下属基金简称万家纳斯达克100指数发起式（QDII）A"
+        "下属基金交易代码019441"
+        "下属基金简称万家纳斯达克100指数发起式（QDII）C"
+        "下属基金交易代码019442"
+        "管理费0.50%基金管理人和销售机构"
+        "托管费0.15%基金托管人"
+        "销售服务费万家纳斯达克100指数发起式（QDII）C0.20%销售机构"
+        "注：本基金A类基金份额不收取销售服务费。"
+        "万家纳斯达克100指数发起式（QDII）A"
+        "基金运作综合费率（年化）持有期间0.71%"
+        "万家纳斯达克100指数发起式（QDII）C"
+        "基金运作综合费率（年化）持有期间0.91%"
+    )
+
+    assert summary.share_codes == ("019441", "019442")
+    assert summary.rates_by_code == {
+        "019441": {
+            "management": Decimal("0.50"),
+            "custody": Decimal("0.15"),
+            "sales_service": Decimal("0"),
+            "comprehensive_operating": Decimal("0.71"),
+        },
+        "019442": {
+            "management": Decimal("0.50"),
+            "custody": Decimal("0.15"),
+            "sales_service": Decimal("0.20"),
+            "comprehensive_operating": Decimal("0.91"),
+        },
+    }
+
+
+
+def test_product_summary_prefers_labeled_share_code_over_primary_code() -> None:
+    summary = parse_product_summary(
+        "天弘中证500交易型开放式指数证券投资基金联接基金(C类份额)"
+        "基金产品资料概要（更新）"
+        "基金简称天弘中证500ETF联接基金代码000962"
+        "基金简称C天弘中证500ETF联接C基金代码C005919"
+        "管理费0.50%基金管理人、销售机构"
+        "托管费0.10%基金托管人"
+        "销售服务费0.25%销售机构"
+        "基金运作综合费用测算"
+        "天弘中证500ETF联接C基金运作综合费率（年化）0.86%"
+    )
+
+    assert summary.share_codes == ("005919",)
+    assert summary.rates_by_code["005919"] == {
+        "management": Decimal("0.50"),
+        "custody": Decimal("0.10"),
+        "sales_service": Decimal("0.25"),
+        "comprehensive_operating": Decimal("0.86"),
+    }
+
 
 def test_product_summary_accepts_subordinate_trading_code() -> None:
     summary = parse_product_summary(
@@ -467,6 +544,42 @@ def test_preserves_pdf_table_columns_for_equal_subscription_limits() -> None:
     ]
 
 
+def test_parses_wanjia_multiline_subscription_limit_table() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("019441", "万家纳斯达克100指数发起式（QDII）A", "A", "人民币", None),
+            SummaryShare("019442", "万家纳斯达克100指数发起式（QDII）C", "C", "人民币", None),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "关于万家纳斯达克100指数型发起式证券投资基金（QDII）调整大额申购（含定期定额投资）业务金额限制并调整总规模上限的公告",
+        """公告送出日期：2026 年 7 月 9 日
+基金主代码 019441
+限制申购（含定期
+定额投资） 金额 （单
+位：人民币元）
+10
+下属分级基金的交易代码 019441 019442
+该分级基金是否暂停大额申购
+（含定期定额投资） 是 是
+下属分级基金的限制申购 （含定
+期定额投资）金额（单位：人民
+币元）
+10 10
+本基金A类份额和本基金C类份额单日累计金额限制调整为10元（A类、C类份额分别计算）。
+""",
+        shares,
+        "http://eid.csrc.gov.cn/fund/disclose/instance_show_pdf_id.do?instanceid=1521812",
+    )
+
+    assert [(state.code, state.limit_amount) for state in states] == [
+        ("019441", Decimal("10")),
+        ("019442", Decimal("10")),
+    ]
+
+
 def test_repeated_class_labels_select_every_named_share_class() -> None:
     shares = {
         share.code: share
@@ -576,6 +689,72 @@ def test_authoritative_subscription_sync_reopens_correct_older_state() -> None:
     assert correct_state.effective_to is None
     assert correct_state.collected_at == collected_at
     assert incorrect_state.effective_to == incorrect_state.effective_from
+    assert session.added == []
+
+
+def test_authoritative_subscription_sync_does_not_replace_known_amount_with_null() -> None:
+    effective_from = datetime(2026, 7, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
+    source_url = (
+        "http://eid.csrc.gov.cn/fund/disclose/"
+        "instance_show_pdf_id.do?instanceid=1521812"
+    )
+    correct_state = SimpleNamespace(
+        id=1,
+        channel="全部渠道",
+        effective_from=effective_from,
+        effective_to=effective_from,
+        limit_status="limited",
+        limit_amount=Decimal("10"),
+        currency="人民币",
+        source_url=source_url,
+        source_time=effective_from,
+        collected_at=datetime(2026, 8, 28, tzinfo=UTC),
+        quality_status="verified",
+    )
+    downgraded_state = SimpleNamespace(
+        id=2,
+        channel="全部渠道",
+        effective_from=effective_from,
+        effective_to=None,
+        limit_status="limited",
+        limit_amount=None,
+        currency="人民币",
+        source_url=source_url,
+        source_time=effective_from,
+        collected_at=datetime(2026, 8, 31, tzinfo=UTC),
+        quality_status="verified",
+    )
+
+    class StubSession:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        def scalars(self, _statement: object) -> list[SimpleNamespace]:
+            return [downgraded_state, correct_state]
+
+        def add(self, record: object) -> None:
+            self.added.append(record)
+
+    session = StubSession()
+    collected_at = datetime(2026, 9, 1, tzinfo=UTC)
+    sync_subscription_state(
+        session,
+        123,
+        SubscriptionState(
+            code="019441",
+            status="limited",
+            limit_amount=None,
+            currency="人民币",
+            effective_date=date(2026, 7, 9),
+            source_url=source_url,
+        ),
+        collected_at,
+        authoritative=True,
+    )
+
+    assert correct_state.effective_to is None
+    assert correct_state.collected_at == collected_at
+    assert downgraded_state.effective_to == effective_from
     assert session.added == []
 
 

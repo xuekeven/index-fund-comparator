@@ -1,6 +1,7 @@
 import argparse
 
 from app.sync.csrc_funds import run_details_sync
+from app.sync_history import run_tracked_sync
 
 
 def main() -> None:
@@ -48,4 +49,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_tracked_sync("F", main)

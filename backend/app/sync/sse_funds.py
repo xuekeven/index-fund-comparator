@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 
 from app.database import get_session_factory
 from app.database_models import (
-    FeeHistory,
     FundListing,
     FundProduct,
     FundShareClass,
@@ -20,6 +19,7 @@ from app.database_models import (
     IndexFamily,
     NavDaily,
 )
+from app.sync_history import run_tracked_sync
 
 
 SSE_LIST_URL = "https://query.sse.com.cn/commonQuery.do"
@@ -114,53 +114,6 @@ def classify(row: dict[str, Any]) -> TargetIndex | None:
             continue
         return target
     return None
-
-
-def parse_sse_fee_rates(payload: dict[str, Any]) -> dict[str, Decimal]:
-    rows = payload.get("result")
-    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
-        raise RuntimeError("SSE fund base info response did not contain a result")
-
-    rates: dict[str, Decimal] = {}
-    for fee_type, field_name in (
-        ("management", "MANAGEMENT_RATE"),
-        ("custody", "TRUSTEESHIP_RATE"),
-    ):
-        raw_value = rows[0].get(field_name)
-        if raw_value in (None, "", "-"):
-            continue
-        try:
-            rate = Decimal(str(raw_value))
-        except InvalidOperation as exc:
-            raise RuntimeError(f"Invalid SSE {field_name}: {raw_value!r}") from exc
-        if rate < 0:
-            raise RuntimeError(f"Invalid negative SSE {field_name}: {raw_value!r}")
-        rates[fee_type] = rate
-    return rates
-
-
-def fetch_sse_fund_fee_rates(
-    rows: list[dict[str, Any]],
-) -> dict[str, dict[str, Decimal]]:
-    matched_rows = {
-        str(row["FUND_CODE"]): row
-        for row in rows
-        if row.get("FUND_CODE")
-        if classify(row) is not None
-    }
-    fees_by_code: dict[str, dict[str, Decimal]] = {}
-    with httpx.Client(trust_env=False, timeout=30) as client:
-        for fund_code, row in matched_rows.items():
-            category = str(row.get("CATEGORY") or "")
-            detail_url = sse_detail_url(fund_code, category)
-            response = client.get(
-                SSE_LIST_URL,
-                params={"sqlId": SSE_FUND_BASE_INFO_SQL_ID, "FUND_CODE": fund_code},
-                headers={"Referer": detail_url, "User-Agent": SSE_USER_AGENT},
-            )
-            response.raise_for_status()
-            fees_by_code[fund_code] = parse_sse_fee_rates(response.json())
-    return fees_by_code
 
 
 def parse_sse_nav_records(payload: dict[str, Any]) -> dict[str, SseNavRecord]:
@@ -291,51 +244,6 @@ def ensure_index_master_data(
             statement.on_conflict_do_update(
                 index_elements=[IndexDefinition.id],
                 set_={**item, "updated_at": collected_at},
-            )
-        )
-
-
-def sync_fee_history(
-    session: Session,
-    share_id: int,
-    rates: dict[str, Decimal],
-    collected_at: datetime,
-    source_url: str,
-) -> None:
-    for fee_type, rate in rates.items():
-        current = session.scalar(
-            select(FeeHistory)
-            .where(
-                FeeHistory.fund_share_class_id == share_id,
-                FeeHistory.fee_type == fee_type,
-                FeeHistory.effective_to.is_(None),
-            )
-            .order_by(
-                FeeHistory.effective_from.desc().nullslast(),
-                FeeHistory.id.desc(),
-            )
-            .limit(1)
-        )
-        if current is not None and current.rate == rate:
-            current.source_url = source_url
-            current.source_time = collected_at
-            current.collected_at = collected_at
-            current.quality_status = "verified"
-            continue
-        if current is not None:
-            current.effective_to = collected_at
-        session.add(
-            FeeHistory(
-                fund_share_class_id=share_id,
-                fee_type=fee_type,
-                rate=rate,
-                rate_unit="percent",
-                tier_description="上交所详情页当前费率；接口未提供原始生效日期",
-                effective_from=collected_at,
-                source_url=source_url,
-                source_time=collected_at,
-                collected_at=collected_at,
-                quality_status="verified",
             )
         )
 
@@ -509,4 +417,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_tracked_sync("A", main)

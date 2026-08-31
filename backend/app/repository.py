@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import Select, and_, case, delete, func, or_, select, union_all
+from sqlalchemy import Select, and_, case, delete, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session, aliased
 
 from app.config import get_settings
@@ -27,6 +27,7 @@ from app.database_models import (
 )
 from app.models import (
     DataStatus,
+    DataFreshness,
     FundComparisonRow,
     FundTagType,
     IndexSummary,
@@ -100,7 +101,10 @@ def calculate_operating_rate(
     management_fee: float | None,
     custody_fee: float | None,
     sales_service_fee: float | None = None,
+    comprehensive_operating_fee: float | None = None,
 ) -> float | None:
+    if comprehensive_operating_fee is not None:
+        return comprehensive_operating_fee
     if management_fee is None or custody_fee is None:
         return None
     return management_fee + custody_fee + (sales_service_fee or 0)
@@ -145,6 +149,14 @@ class FundRepository(ABC):
         venue: str | None = None,
         exchanges: tuple[str, ...] = (),
     ) -> datetime | None: ...
+
+    @abstractmethod
+    def get_data_freshness(
+        self,
+        index_id: str,
+        venue: str | None = None,
+        exchanges: tuple[str, ...] = (),
+    ) -> DataFreshness: ...
 
     @abstractmethod
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]: ...
@@ -239,6 +251,14 @@ class SampleFundRepository(FundRepository):
         exchanges: tuple[str, ...] = (),
     ) -> datetime | None:
         return None
+
+    def get_data_freshness(
+        self,
+        index_id: str,
+        venue: str | None = None,
+        exchanges: tuple[str, ...] = (),
+    ) -> DataFreshness:
+        return DataFreshness()
 
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]:
         if index_id is None:
@@ -429,12 +449,12 @@ class PostgresFundRepository(FundRepository):
             family, count = row
             return self._index_summary(family, count or 0)
 
-    def get_last_synced_at(
-        self,
+    @staticmethod
+    def _scoped_product_ids(
         index_id: str,
-        venue: str | None = None,
-        exchanges: tuple[str, ...] = (),
-    ) -> datetime | None:
+        venue: str | None,
+        exchanges: tuple[str, ...],
+    ) -> Select[Any]:
         product_ids = (
             select(FundProduct.id)
             .join(IndexDefinition, FundProduct.exact_benchmark_id == IndexDefinition.id)
@@ -449,24 +469,49 @@ class PostgresFundRepository(FundRepository):
                 .join(FundListing, FundListing.fund_share_class_id == FundShareClass.id)
                 .where(FundListing.exchange.in_(exchanges))
             )
-        product_ids = product_ids.distinct()
+        return product_ids.distinct()
 
+    def get_data_freshness(
+        self,
+        index_id: str,
+        venue: str | None = None,
+        exchanges: tuple[str, ...] = (),
+    ) -> DataFreshness:
+        product_ids = self._scoped_product_ids(index_id, venue, exchanges)
         statements = (
-            select(func.max(FundProduct.collected_at).label("collected_at"))
+            select(
+                literal("master").label("category"),
+                func.max(FundProduct.collected_at).label("collected_at"),
+            )
             .where(FundProduct.id.in_(product_ids)),
-            select(func.max(FundShareClass.collected_at).label("collected_at"))
+            select(
+                literal("master").label("category"),
+                func.max(FundShareClass.collected_at).label("collected_at"),
+            )
             .where(FundShareClass.fund_product_id.in_(product_ids)),
-            select(func.max(FundListing.collected_at).label("collected_at"))
+            select(
+                literal("master").label("category"),
+                func.max(FundListing.collected_at).label("collected_at"),
+            )
             .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
             .where(FundShareClass.fund_product_id.in_(product_ids)),
-            select(func.max(NavDaily.collected_at).label("collected_at"))
+            select(
+                literal("nav").label("category"),
+                func.max(NavDaily.collected_at).label("collected_at"),
+            )
             .join(FundShareClass, NavDaily.fund_share_class_id == FundShareClass.id)
             .where(FundShareClass.fund_product_id.in_(product_ids)),
-            select(func.max(MarketQuote.collected_at).label("collected_at"))
+            select(
+                literal("quote").label("category"),
+                func.max(MarketQuote.collected_at).label("collected_at"),
+            )
             .join(FundListing, MarketQuote.fund_listing_id == FundListing.id)
             .join(FundShareClass, FundListing.fund_share_class_id == FundShareClass.id)
             .where(FundShareClass.fund_product_id.in_(product_ids)),
-            select(func.max(FundScale.collected_at).label("collected_at"))
+            select(
+                literal("scale").label("category"),
+                func.max(FundScale.collected_at).label("collected_at"),
+            )
             .outerjoin(FundShareClass, FundScale.fund_share_class_id == FundShareClass.id)
             .where(
                 or_(
@@ -474,22 +519,51 @@ class PostgresFundRepository(FundRepository):
                     FundShareClass.fund_product_id.in_(product_ids),
                 )
             ),
-            select(func.max(FeeHistory.collected_at).label("collected_at"))
+            select(
+                literal("fee").label("category"),
+                func.max(FeeHistory.collected_at).label("collected_at"),
+            )
             .join(FundShareClass, FeeHistory.fund_share_class_id == FundShareClass.id)
             .where(FundShareClass.fund_product_id.in_(product_ids)),
-            select(func.max(CalculatedMetric.collected_at).label("collected_at"))
+            select(
+                literal("metric").label("category"),
+                func.max(CalculatedMetric.collected_at).label("collected_at"),
+            )
             .join(FundShareClass, CalculatedMetric.fund_share_class_id == FundShareClass.id)
             .where(FundShareClass.fund_product_id.in_(product_ids)),
-            select(func.max(SalesLimitHistory.collected_at).label("collected_at"))
+            select(
+                literal("subscription").label("category"),
+                func.max(SalesLimitHistory.collected_at).label("collected_at"),
+            )
             .join(
                 FundShareClass,
                 SalesLimitHistory.fund_share_class_id == FundShareClass.id,
             )
             .where(FundShareClass.fund_product_id.in_(product_ids)),
         )
-        sync_times = union_all(*statements).subquery()
+        freshness_rows = union_all(*statements).subquery()
         with self._session_factory() as session:
-            return session.scalar(select(func.max(sync_times.c.collected_at)))
+            rows = session.execute(
+                select(
+                    freshness_rows.c.category,
+                    func.max(freshness_rows.c.collected_at),
+                ).group_by(freshness_rows.c.category)
+            )
+            return DataFreshness(
+                **{
+                    category: collected_at
+                    for category, collected_at in rows
+                    if collected_at is not None
+                }
+            )
+
+    def get_last_synced_at(
+        self,
+        index_id: str,
+        venue: str | None = None,
+        exchanges: tuple[str, ...] = (),
+    ) -> datetime | None:
+        return self.get_data_freshness(index_id, venue, exchanges).latest_at
 
     def list_funds(self, index_id: str | None = None) -> list[FundComparisonRow]:
         with self._session_factory() as session:
@@ -945,7 +1019,13 @@ class PostgresFundRepository(FundRepository):
         management = fees.get("management")
         custody = fees.get("custody")
         sales_service = fees.get("sales_service")
-        expense_rate = calculate_operating_rate(management, custody, sales_service)
+        comprehensive_operating = fees.get("comprehensive_operating")
+        expense_rate = calculate_operating_rate(
+            management,
+            custody,
+            sales_service,
+            comprehensive_operating,
+        )
         nav = float(row["nav"]) if row["nav"] is not None else None
         close = float(row["close_price"]) if row["close_price"] is not None else None
         investment_scopes = row["investment_scopes"] or []

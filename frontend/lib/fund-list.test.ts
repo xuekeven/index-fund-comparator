@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   calculateQdiiPurchaseLimits,
+  calculateSubscriptionLimitTotals,
   EXCHANGES,
   filterFundRows,
+  groupFundRowsByIndex,
   latestTradingDataDate,
   sortFundRows,
   VENUES,
@@ -262,6 +264,61 @@ test("sums visible off-exchange QDII purchase limits by currency", () => {
     cny: 200,
     usd: 40,
   });
+});
+
+test("groups tagged funds by index while preserving the displayed order", () => {
+  const rows = [
+    fund({ id: "sp-1", code: "017641", indexId: "sp-500" }),
+    fund({ id: "sp-2", code: "017643", indexId: "sp-500" }),
+    fund({ id: "nasdaq-1", code: "019172", indexId: "nasdaq-100" }),
+    fund({ id: "sp-3", code: "019305", indexId: "sp-500" }),
+  ];
+
+  assert.deepEqual(
+    groupFundRowsByIndex(rows).map((group) => ({
+      indexId: group.indexId,
+      codes: group.funds.map((item) => item.code),
+    })),
+    [
+      { indexId: "sp-500", codes: ["017641", "017643", "019305"] },
+      { indexId: "nasdaq-100", codes: ["019172"] },
+    ],
+  );
+});
+
+test("sums recurring subscription limits by currency", () => {
+  const rows = [
+    fund({
+      id: "cny-a",
+      tradingVenue: "场外",
+      subscriptionStatus: "limited",
+      subscriptionLimitAmount: 10,
+      subscriptionLimitCurrency: "人民币",
+    }),
+    fund({
+      id: "usd",
+      tradingVenue: "场外",
+      currency: "美元",
+      subscriptionStatus: "limited",
+      subscriptionLimitAmount: 1,
+      subscriptionLimitCurrency: "美元",
+    }),
+    fund({
+      id: "cny-c",
+      tradingVenue: "场外",
+      subscriptionStatus: "limited",
+      subscriptionLimitAmount: 10,
+      subscriptionLimitCurrency: "人民币",
+    }),
+    fund({
+      id: "open",
+      tradingVenue: "场外",
+      subscriptionStatus: "open",
+      subscriptionLimitAmount: null,
+    }),
+  ];
+
+  assert.deepEqual(calculateSubscriptionLimitTotals(rows), { cny: 20, usd: 1 });
 });
 
 test("sorts numeric values while keeping missing values last", () => {

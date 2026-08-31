@@ -298,7 +298,8 @@ class FeeHistory(Base, ProvenanceMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "fee_type IN ('management', 'custody', 'sales_service', 'subscription', 'redemption', 'other')",
+            "fee_type IN ('management', 'custody', 'sales_service', "
+            "'comprehensive_operating', 'subscription', 'redemption', 'other')",
             name="ck_fee_history_type",
         ),
         CheckConstraint("rate >= 0", name="ck_fee_history_rate_nonnegative"),

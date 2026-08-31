@@ -64,11 +64,22 @@ export interface FundTagResponse {
   tags: FundTag[];
 }
 
+export interface DataFreshness {
+  master: string | null;
+  nav: string | null;
+  quote: string | null;
+  fee: string | null;
+  scale: string | null;
+  metric: string | null;
+  subscription: string | null;
+}
+
 export interface FundListResponse {
   index: IndexSummary;
   items: FundComparisonRow[];
   total: number;
   lastSyncedAt: string | null;
+  dataFreshness: DataFreshness;
   generatedAt: string;
   dataMode: string;
 }

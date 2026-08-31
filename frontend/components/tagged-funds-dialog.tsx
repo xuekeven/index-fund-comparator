@@ -1,6 +1,10 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
+import {
+  calculateSubscriptionLimitTotals,
+  groupFundRowsByIndex,
+} from "@/lib/fund-list";
 import { getFundDetailUrl } from "@/lib/fund-links";
 import type { FundComparisonRow, FundTag } from "@/lib/types";
 import { FUND_TAG_META } from "./fund-tag-meta";
@@ -34,6 +38,21 @@ function SubscriptionLimit({ fund }: { fund: FundComparisonRow }) {
   return <span className="subscription-tag limited">{label}</span>;
 }
 
+const amountFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+
+function RecurringTotal({ funds }: { funds: FundComparisonRow[] }) {
+  const { cny, usd } = calculateSubscriptionLimitTotals(funds);
+  if (cny === 0 && usd === 0) {
+    return <span className="tagged-recurring-total muted">总定投金额暂无</span>;
+  }
+  return (
+    <strong className="tagged-recurring-total">
+      总定投{cny > 0 ? `${amountFormatter.format(cny)}元` : ""}
+      {usd > 0 ? `${amountFormatter.format(usd)}美元` : ""}
+    </strong>
+  );
+}
+
 export function TaggedFundsDialog({
   tag,
   funds,
@@ -45,6 +64,7 @@ export function TaggedFundsDialog({
 }: TaggedFundsDialogProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const meta = FUND_TAG_META[tag];
+  const groups = groupFundRowsByIndex(funds);
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement
@@ -113,54 +133,66 @@ export function TaggedFundsDialog({
           ) : (
             <>
               <p className="tagged-funds-summary">
-                共有 <strong>{funds.length}</strong> 个基金份额
+                共有 <strong>{groups.length}</strong> 种基金、
+                <strong>{funds.length}</strong> 个基金份额
               </p>
-              <div className="tagged-funds-table-wrap">
-                <table className="tagged-funds-table">
-                  <thead>
-                    <tr>
-                      <th>跟踪指数</th>
-                      <th>基金代码</th>
-                      <th>基金份额</th>
-                      <th>类型</th>
-                      <th>币种</th>
-                      <th>申购限额</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {funds.map((fund) => {
-                      const detailUrl = getFundDetailUrl(fund);
-                      return (
-                        <tr key={fund.id}>
-                          <td><strong>{indexNames[fund.indexId] ?? fund.indexId}</strong></td>
-                          <td>
-                            {detailUrl ? (
-                              <a
-                                className="fund-code-link"
-                                href={detailUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                title={`查看${fund.displayName}官方详情`}
-                              >
-                                {fund.code}
-                              </a>
-                            ) : <span className="tagged-fund-code">{fund.code}</span>}
-                          </td>
-                          <td>
-                            <strong>{fund.displayName}</strong>
-                            <small>{fund.fundCompany}</small>
-                          </td>
-                          <td>
-                            {fund.tradingVenue}
-                            {fund.exchange ? <small>{fund.exchange}</small> : null}
-                          </td>
-                          <td>{fund.currency}</td>
-                          <td><SubscriptionLimit fund={fund} /></td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              <div className="tagged-funds-groups">
+                {groups.map((group) => (
+                  <section className="tagged-funds-group" key={group.indexId}>
+                    <header className="tagged-funds-group-header">
+                      <div>
+                        <h3>{indexNames[group.indexId] ?? group.indexId}</h3>
+                        <span>{group.funds.length} 个基金份额</span>
+                      </div>
+                      {tag === "recurring" ? <RecurringTotal funds={group.funds} /> : null}
+                    </header>
+                    <div className="tagged-funds-table-wrap">
+                      <table className="tagged-funds-table">
+                        <thead>
+                          <tr>
+                            <th>基金代码</th>
+                            <th>基金份额</th>
+                            <th>类型</th>
+                            <th>币种</th>
+                            <th>申购限额</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {group.funds.map((fund) => {
+                            const detailUrl = getFundDetailUrl(fund);
+                            return (
+                              <tr key={fund.id}>
+                                <td>
+                                  {detailUrl ? (
+                                    <a
+                                      className="fund-code-link"
+                                      href={detailUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title={`查看${fund.displayName}官方详情`}
+                                    >
+                                      {fund.code}
+                                    </a>
+                                  ) : <span className="tagged-fund-code">{fund.code}</span>}
+                                </td>
+                                <td>
+                                  <strong>{fund.displayName}</strong>
+                                  <small>{fund.fundCompany}</small>
+                                </td>
+                                <td>
+                                  {fund.tradingVenue}
+                                  {fund.exchange ? <small>{fund.exchange}</small> : null}
+                                </td>
+                                <td>{fund.currency}</td>
+                                <td><SubscriptionLimit fund={fund} /></td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                ))}
               </div>
             </>
           )}

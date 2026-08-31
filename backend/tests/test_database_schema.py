@@ -61,6 +61,17 @@ def test_single_user_tags_are_bound_to_fund_shares() -> None:
     assert "recurring" in str(tag_constraint.sqltext)
 
 
+def test_fee_history_accepts_comprehensive_operating_rate() -> None:
+    fee_table = Base.metadata.tables["fee_history"]
+    fee_constraint = next(
+        constraint
+        for constraint in fee_table.constraints
+        if constraint.name == "ck_fee_history_type"
+    )
+
+    assert "comprehensive_operating" in str(fee_constraint.sqltext)
+
+
 
 def test_investment_notes_are_single_user_and_structured() -> None:
     note_table = Base.metadata.tables["investment_note"]

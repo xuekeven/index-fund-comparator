@@ -17,6 +17,7 @@ export type SyncTaskState = {
   status: "idle" | "queued" | "running" | "succeeded" | "failed";
   startedAt: string | null;
   finishedAt: string | null;
+  lastSucceededAt: string | null;
   returnCode: number | null;
   output: string;
 };
@@ -24,6 +25,14 @@ export type SyncTaskSnapshot = {
   activeJob: SyncTaskKey | null;
   currentScript: Exclude<SyncTaskKey, "all"> | null;
   tasks: Record<SyncTaskKey, SyncTaskState>;
+};
+export type SyncHistoryItem = {
+  time: string;
+  result: "succeeded" | "failed" | "stopped";
+  method: "scheduled" | "dialog" | "terminal";
+};
+export type SyncHistoryResponse = {
+  items: SyncHistoryItem[];
 };
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -124,6 +133,13 @@ export function updateFundTags(
 
 export function getSyncTasks(signal?: AbortSignal): Promise<SyncTaskSnapshot> {
   return getJson<SyncTaskSnapshot>("/sync-tasks", signal);
+}
+
+export function getSyncTaskHistory(
+  task: SyncTaskKey,
+  signal?: AbortSignal,
+): Promise<SyncHistoryResponse> {
+  return getJson<SyncHistoryResponse>(`/sync-tasks/${task}/history`, signal);
 }
 
 export function startSyncTask(task: SyncTaskKey): Promise<SyncTaskSnapshot> {

@@ -5,13 +5,14 @@ import pytest
 
 from app.sync.sse_details import (
     calculate_return_metrics,
+    merge_product_summary_fee_rates,
     parse_sse_detail_info,
     parse_sse_nav_history,
     parse_sse_snapshot,
 )
 
 
-def test_parses_sse_detail_fees_and_scale() -> None:
+def test_parses_sse_detail_scale_without_using_exchange_fee_rates() -> None:
     detail = parse_sse_detail_info(
         {
             "result": [
@@ -25,11 +26,39 @@ def test_parses_sse_detail_fees_and_scale() -> None:
         }
     )
 
-    assert detail.fee_rates == {
-        "management": Decimal("0.15"),
-        "custody": Decimal("0.05"),
-    }
+    assert detail.fee_rates == {}
     assert detail.scale_yi == Decimal("407.2716")
+
+
+def test_uses_product_summary_pdf_for_all_fee_rates() -> None:
+    detail = parse_sse_detail_info(
+        {
+            "result": [
+                {
+                    "MANAGEMENT_RATE": "0.15",
+                    "TRUSTEESHIP_RATE": "0.05",
+                    "SCALE": "1",
+                }
+            ]
+        }
+    )
+
+    merged = merge_product_summary_fee_rates(
+        detail,
+        {
+            "management": Decimal("0.60"),
+            "custody": Decimal("0.20"),
+            "comprehensive_operating": Decimal("0.80"),
+        },
+        "https://example.com/summary.pdf",
+    )
+
+    assert merged.fee_rates == {
+        "management": Decimal("0.60"),
+        "custody": Decimal("0.20"),
+        "comprehensive_operating": Decimal("0.80"),
+    }
+    assert merged.fee_source_url == "https://example.com/summary.pdf"
 
 
 def test_parses_sse_detail_snapshot() -> None:

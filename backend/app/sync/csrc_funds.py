@@ -25,6 +25,7 @@ from app.database_models import (
     NavDaily,
     SalesLimitHistory,
 )
+from app.sync_history import run_tracked_sync
 from app.sync.company_official_nav import OfficialCompanyNavFetcher
 from app.sync.eid_disclosures import (
     DisclosureDocument,
@@ -107,6 +108,7 @@ class ProductSummary:
     shares: tuple[SummaryShare, ...]
     rates: dict[str, Decimal]
     benchmark_description: str | None
+    rates_by_code: dict[str, dict[str, Decimal]]
 
     @property
     def share_codes(self) -> tuple[str, ...]:
@@ -397,37 +399,145 @@ def _summary_share_name(compact: str, code: str) -> str:
     return code
 
 
-def parse_product_summary(text: str) -> ProductSummary:
-    compact = re.sub(r"\s+", "", text)
-    subordinate = re.search(r"下属基金(?:交易)?代码((?:\d{6})+)", compact)
-    share_code = re.search(r"份额代码(\d{6})", compact)
-    primary = re.search(r"(?<!下属)基金代码(\d{6})", compact)
-    if subordinate:
-        share_codes = _code_chunks(subordinate.group(1))
-    elif share_code:
-        share_codes = (share_code.group(1),)
-    elif primary:
-        share_codes = (primary.group(1),)
-    else:
-        raise RuntimeError("Fund product summary did not contain a share code")
+def _summary_shares(compact: str) -> tuple[SummaryShare, ...]:
+    subordinate_groups = re.findall(
+        r"下属基金简称(.+?)下属基金(?:交易)?代码((?:\d{6})+)",
+        compact,
+    )
+    share_names: list[tuple[str, str]] = []
+    for name_block, raw_codes in subordinate_groups:
+        codes = _code_chunks(raw_codes)
+        class_tokens = re.findall(r"[A-Z]", name_block.upper())
+        for index, code in enumerate(codes):
+            if len(codes) == 1:
+                display_name = name_block.strip("：:，,；;")
+            elif len(class_tokens) == len(codes):
+                display_name = class_tokens[index]
+            else:
+                display_name = _summary_share_name(compact, code)
+            share_names.append((code, display_name))
 
-    shares = tuple(
+    if not share_names:
+        for share_class, display_name, code in re.findall(
+            r"基金简称([A-Z])(.{1,160}?)"
+            r"基金代码\1(?:人民币|美元现汇|美元现钞)?(\d{6})",
+            compact[:2000],
+        ):
+            normalized_name = display_name.strip("：:，,；;")
+            if share_class not in normalized_name.upper():
+                normalized_name = f"{normalized_name}{share_class}"
+            share_names.append((code, normalized_name))
+
+    if not share_names:
+        subordinate = re.search(
+            r"下属基金(?:交易)?代码((?:\d{6})+)", compact
+        )
+        share_code = re.search(r"份额代码(\d{6})", compact)
+        primary = re.search(r"(?<!下属)基金代码(\d{6})", compact)
+        if subordinate:
+            share_names.extend(
+                (code, _summary_share_name(compact, code))
+                for code in _code_chunks(subordinate.group(1))
+            )
+        elif share_code:
+            code = share_code.group(1)
+            share_names.append((code, _summary_share_name(compact, code)))
+        elif primary:
+            code = primary.group(1)
+            share_names.append((code, _summary_share_name(compact, code)))
+        else:
+            raise RuntimeError("Fund product summary did not contain a share code")
+
+    return tuple(
         SummaryShare(
             code=code,
-            display_name=(display_name := _summary_share_name(compact, code)),
+            display_name=display_name,
             share_class=share_identity(display_name)[0],
             currency=share_identity(display_name)[1],
             currency_form=share_identity(display_name)[2],
         )
-        for code in share_codes
+        for code, display_name in dict(share_names).items()
     )
+
+
+def _summary_rates_by_code(
+    compact: str,
+    shares: tuple[SummaryShare, ...],
+    rates: dict[str, Decimal],
+) -> dict[str, dict[str, Decimal]]:
+    common_rates = {
+        fee_type: rate
+        for fee_type, rate in rates.items()
+        if fee_type in {"management", "custody"}
+    }
+    rates_by_code = {share.code: dict(common_rates) for share in shares}
+
+    zero_sales_classes: set[str] = set()
+    for match in re.finditer(
+        r"本基金(.{0,50}?)基金份额不收取销售服务费",
+        compact,
+    ):
+        zero_sales_classes.update(re.findall(r"([A-Z])类", match.group(1)))
+    for share in shares:
+        if share.share_class in zero_sales_classes:
+            rates_by_code[share.code]["sales_service"] = Decimal("0")
+
+    sales_row = re.search(
+        r"销售服务费(?P<label>.{0,180}?)(?P<rate>[0-9]+(?:\.[0-9]+)?)%",
+        compact,
+    )
+    if sales_row:
+        sales_rate = Decimal(sales_row.group("rate"))
+        label = sales_row.group("label")
+        explicit_shares = [
+            share
+            for share in shares
+            if re.sub(r"\s+", "", share.display_name) in label
+        ]
+        if explicit_shares:
+            for share in explicit_shares:
+                rates_by_code[share.code]["sales_service"] = sales_rate
+        else:
+            for share in shares:
+                if share.share_class not in zero_sales_classes:
+                    rates_by_code[share.code]["sales_service"] = sales_rate
+    elif len(shares) == 1:
+        rates_by_code[shares[0].code]["sales_service"] = rates.get(
+            "sales_service", Decimal("0")
+        )
+
+    found_comprehensive = False
+    for share in shares:
+        display_name = re.sub(r"\s+", "", share.display_name)
+        match = re.search(
+            rf"{re.escape(display_name)}基金运作综合费率"
+            r"(?:[（(]年化[）)])?.{0,80}?([0-9]+(?:\.[0-9]+)?)%",
+            compact,
+        )
+        if match:
+            rates_by_code[share.code]["comprehensive_operating"] = Decimal(
+                match.group(1)
+            )
+            found_comprehensive = True
+    if not found_comprehensive and len(shares) == 1:
+        comprehensive = rates.get("comprehensive_operating")
+        if comprehensive is not None:
+            rates_by_code[shares[0].code]["comprehensive_operating"] = comprehensive
+
+    return rates_by_code
+
+
+def parse_product_summary(text: str) -> ProductSummary:
+    compact = re.sub(r"\s+", "", text)
+    shares = _summary_shares(compact)
     rates = parse_fee_rates(text, include_sales_service=True)
+    rates_by_code = _summary_rates_by_code(compact, shares, rates)
 
     benchmark_match = re.search(
         r"业绩比较基准(.+?)(?:风险收益特征|基金风险等级|\(二\)投资组合)", compact
     )
     benchmark = benchmark_match.group(1).strip("。；;") if benchmark_match else None
-    return ProductSummary(shares, rates, benchmark or None)
+    return ProductSummary(shares, rates, benchmark or None, rates_by_code)
 
 
 def _announcement_date(compact: str) -> date:
@@ -543,21 +653,39 @@ def _announcement_limits(
     # as 100 100. Compacting first turns that row into 100100.
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for index, line in enumerate(lines):
-        compact_line = re.sub(r"\s+", "", line)
-        if not (
-            "金额" in compact_line
-            and "单位" in compact_line
-            and (
-                "申购" in compact_line
-                or "购金额" in compact_line
-                or "限" in compact_line
+        # PDF table headers commonly wrap ``金额`` and ``单位`` onto
+        # separate lines. Locate the line that closes the unit marker, then
+        # inspect only its tail and the immediately following value row. A
+        # wider scan can mistake the next table's six-digit fund codes for
+        # per-share amounts.
+        header_end: int | None = None
+        header_block = ""
+        for candidate_end in range(index, min(index + 4, len(lines))):
+            header_block = re.sub(
+                r"\s+", "", "".join(lines[index : candidate_end + 1])
             )
-        ):
+            if (
+                "金额" in header_block
+                and re.search(
+                    r"单位[：:]?(?:人民币元|美元)[）)]",
+                    header_block,
+                )
+                and (
+                    "申购" in header_block
+                    or "购金额" in header_block
+                    or "限" in header_block
+                )
+            ):
+                header_end = candidate_end
+                break
+        if header_end is None:
             continue
         value_lines: list[str] = []
-        if "）" in line:
-            value_lines.append(line.rsplit("）", 1)[-1])
-        value_lines.extend(lines[index + 1 : index + 3])
+        inline_value = lines[header_end].rsplit("）", 1)[-1]
+        if inline_value.strip():
+            value_lines.append(inline_value)
+        if header_end + 1 < len(lines):
+            value_lines.append(lines[header_end + 1])
         for value_line in value_lines:
             values = re.findall(
                 r"(?<!\d)(\d[\d,]*(?:\.\d+)?)(?!\d)", value_line
@@ -959,6 +1087,26 @@ def sync_subscription_state(
             )
         )
     )
+    effective_limit_amount = state.limit_amount
+    if effective_limit_amount is None:
+        # A later parser run must not discard a verified amount from the
+        # exact same official document and effective state. Reuse the richer
+        # audited value and allow authoritative sync to reopen that record.
+        richer_record = next(
+            (
+                record
+                for record in records
+                if record.channel == state.channel
+                and record.effective_from == effective_from
+                and record.limit_status == state.status
+                and record.currency == state.currency
+                and record.source_url == state.source_url
+                and record.limit_amount is not None
+            ),
+            None,
+        )
+        if richer_record is not None:
+            effective_limit_amount = richer_record.limit_amount
     active_records = [record for record in records if record.effective_to is None]
     matching_records = [
         record
@@ -966,7 +1114,7 @@ def sync_subscription_state(
         if record.channel == state.channel
         and record.effective_from == effective_from
         and record.limit_status == state.status
-        and record.limit_amount == state.limit_amount
+        and record.limit_amount == effective_limit_amount
         and record.currency == state.currency
     ]
     existing = next(
@@ -1011,7 +1159,7 @@ def sync_subscription_state(
             channel=state.channel,
             investor_type="全部投资者",
             business_type="申购",
-            limit_amount=state.limit_amount,
+            limit_amount=effective_limit_amount,
             currency=state.currency,
             limit_status=state.status,
             source_url=state.source_url,
@@ -2117,7 +2265,13 @@ def run_details_sync(
                         for document, summary in summaries:
                             for code in summary.share_codes:
                                 rates_by_code.setdefault(
-                                    code, (summary.rates, document.url)
+                                    code,
+                                    (
+                                        summary.rates_by_code.get(
+                                            code, summary.rates
+                                        ),
+                                        document.url,
+                                    ),
                                 )
                         common_rates: (
                             tuple[dict[str, Decimal], str] | None
@@ -2227,4 +2381,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_tracked_sync("E", main)

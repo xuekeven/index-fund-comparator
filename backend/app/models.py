@@ -117,6 +117,29 @@ class FundTagResponse(ApiModel):
     tags: list[FundTagType]
 
 
+class DataFreshness(ApiModel):
+    master: datetime | None = None
+    nav: datetime | None = None
+    quote: datetime | None = None
+    fee: datetime | None = None
+    scale: datetime | None = None
+    metric: datetime | None = None
+    subscription: datetime | None = None
+
+    @property
+    def latest_at(self) -> datetime | None:
+        values = (
+            self.master,
+            self.nav,
+            self.quote,
+            self.fee,
+            self.scale,
+            self.metric,
+            self.subscription,
+        )
+        return max((value for value in values if value is not None), default=None)
+
+
 class InvestmentNoteCategory(str, Enum):
     LONG_TERM = "长期"
     REAL_TIME = "实时"
@@ -164,6 +187,7 @@ class FundListResponse(ApiModel):
     items: list[FundComparisonRow]
     total: int
     last_synced_at: datetime | None = None
+    data_freshness: DataFreshness = Field(default_factory=DataFreshness)
     generated_at: datetime
     data_mode: str
 

@@ -14,6 +14,11 @@ backend/.env
 backend/*.egg-info/
 backend/**/__pycache__/
 backend/.pytest_cache/
+backend/.coverage
+backend/.sync.lock
+backend/.sync-state.json
+backend/.sync-history.json
+backend/.sync-history.json.lock
 
 # Process manager
 *.log

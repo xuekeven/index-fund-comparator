@@ -1,11 +1,8 @@
 from datetime import date
 from decimal import Decimal
 
-import pytest
-
 from app.sync.sse_funds import (
     classify,
-    parse_sse_fee_rates,
     parse_sse_nav_records,
     sse_detail_url,
 )
@@ -33,42 +30,6 @@ def test_excludes_csi_500_enhanced_and_variant_indices() -> None:
 def test_classifies_us_index_etfs() -> None:
     assert classify(row("标准普尔500指数", "标普500ETF博时")).family_id == "sp-500"
     assert classify(row("纳斯达克100指数", "纳指ETF国泰")).family_id == "nasdaq-100"
-
-
-def test_parses_sse_management_and_custody_rates() -> None:
-    rates = parse_sse_fee_rates(
-        {
-            "result": [
-                {
-                    "FUND_CODE": "510500",
-                    "MANAGEMENT_RATE": "0.15",
-                    "TRUSTEESHIP_RATE": "0.05",
-                }
-            ]
-        }
-    )
-
-    assert rates == {
-        "management": Decimal("0.15"),
-        "custody": Decimal("0.05"),
-    }
-
-
-def test_skips_fee_fields_without_a_value() -> None:
-    rates = parse_sse_fee_rates(
-        {
-            "result": [
-                {"MANAGEMENT_RATE": "-", "TRUSTEESHIP_RATE": ""}
-            ]
-        }
-    )
-
-    assert rates == {}
-
-
-def test_rejects_invalid_sse_fee_rate() -> None:
-    with pytest.raises(RuntimeError, match="MANAGEMENT_RATE"):
-        parse_sse_fee_rates({"result": [{"MANAGEMENT_RATE": "unknown"}]})
 
 
 def test_parses_sse_detail_page_nav() -> None:

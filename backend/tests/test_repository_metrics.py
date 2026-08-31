@@ -9,6 +9,11 @@ def test_operating_rate_includes_sales_service_fee() -> None:
     assert calculate_operating_rate(0.6, 0.2, 0.35) == 1.15
 
 
+def test_operating_rate_prefers_pdf_comprehensive_rate() -> None:
+    assert calculate_operating_rate(0.6, 0.2, 0.35, 1.18) == 1.18
+    assert calculate_operating_rate(None, None, None, 0.66) == 0.66
+
+
 def test_operating_rate_requires_management_and_custody_fees() -> None:
     assert calculate_operating_rate(0.6, None) is None
     assert calculate_operating_rate(None, 0.2) is None

@@ -23,6 +23,7 @@ from app.database_models import (
     MarketQuote,
     NavDaily,
 )
+from app.sync_history import run_tracked_sync
 from app.sync.csrc_funds import EID_NAV_URL
 from app.sync.sse_details import calculate_return_metrics
 from app.sync.sse_funds import ASIA_SHANGHAI, SseNavRecord
@@ -468,4 +469,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_tracked_sync("D", main)

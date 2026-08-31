@@ -113,11 +113,11 @@ uv run alembic revision --autogenerate -m "describe schema change"
 
 正式同步任务只在 Home Server 执行。本地环境直接读取同步后的共享数据，不再运行第二套定时任务。需要开发或排查采集器时，先使用 `--dry-run`；只有确认不会影响共享数据后，才执行正式同步。
 
-Home Server 的同步时间由 `deploy/schedules.conf` 管理，并通过 `deploy/manage-crontab.sh` 幂等安装到部署用户的 crontab。安装脚本只替换带项目标记的任务以及旧版同名同步命令，不会覆盖该用户的其他定时任务。
+Home Server 的同步时间由 `deploy/schedules.conf` 管理，并通过 `deploy/manage-crontab.sh` 幂等安装到部署用户的 crontab。安装脚本只替换带项目标记的任务以及旧版同名同步命令，不会覆盖该用户的其他定时任务。cron 与 Web 手动同步共用 `backend/.sync.lock` 全局锁，重叠任务会串行执行；Web 端任务状态保存在 `backend/.sync-state.json`，服务重启后会标记未完成任务为中断。
 
 各官方数据源、同步脚本、字段转换和筛选规则见[基金数据来源](./数据来源.md)。
 
-在 Home Server 同步沪深交易所官方 ETF 清单、上交所官方展示规模、管理费率、托管费率、单位净值和日行情：
+在 Home Server 同步沪深交易所官方 ETF 清单、交易所行情与净值，以及证监会产品资料概要中的管理费率、托管费率和基金运作综合费率：
 
 ```bash
 cd backend
@@ -135,7 +135,7 @@ uv run python -m app.sync.csrc_details --dry-run
 uv run python -m app.sync.csrc_details
 ```
 
-同步命令可重复执行，但仍应避免本地和服务器同时运行。上交所脚本 A 与深交所脚本 C 每周更新基金列表和目标基金主数据；上交所脚本 B 和深交所脚本 D 在工作日更新详情数据。场外脚本 E 每月 1 日从证监会公募基金目录筛选目标并更新基金和主份额；脚本 F 在周一至周五更新产品概要费率、季度规模、正式净值、申购状态及五个区间收益率。场外基金没有交易所交易价，不写入或计算偏离。脚本 C/F 共用 `backend/app/sync/eid_disclosures.py` 的披露 PDF 解析和费率入库逻辑。
+同步命令可重复执行，但仍应避免本地和服务器同时运行。上交所脚本 A 与深交所脚本 C 每周更新基金列表和目标基金主数据；上交所脚本 B 和深交所脚本 D 在工作日更新详情数据。场外脚本 E 每月 1 日从证监会公募基金目录筛选目标并更新基金和主份额；脚本 F 在周一至周五更新产品概要费率、季度规模、正式净值、申购状态及五个区间收益率。场外基金没有交易所交易价，不写入或计算偏离。上交所费率不再以上交所详情页为准；脚本 B/C/F 共用 `backend/app/sync/eid_disclosures.py` 的证监会披露 PDF 解析和费率入库逻辑。
 
 ## 验证
 

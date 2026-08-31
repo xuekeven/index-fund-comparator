@@ -119,6 +119,36 @@ export function calculateQdiiPurchaseLimits(funds: FundComparisonRow[]) {
   return { hasQdii, cny, usd };
 }
 
+export function calculateSubscriptionLimitTotals(funds: FundComparisonRow[]) {
+  let cny = 0;
+  let usd = 0;
+
+  for (const fund of funds) {
+    if (
+      fund.tradingVenue !== "场外"
+      || fund.subscriptionStatus !== "limited"
+      || fund.subscriptionLimitAmount === null
+    ) {
+      continue;
+    }
+    const currency = fund.subscriptionLimitCurrency ?? fund.currency;
+    if (currency === "美元") usd += fund.subscriptionLimitAmount;
+    if (currency === "人民币") cny += fund.subscriptionLimitAmount;
+  }
+
+  return { cny, usd };
+}
+
+export function groupFundRowsByIndex(funds: FundComparisonRow[]) {
+  const groups = new Map<string, FundComparisonRow[]>();
+  for (const fund of funds) {
+    const group = groups.get(fund.indexId);
+    if (group) group.push(fund);
+    else groups.set(fund.indexId, [fund]);
+  }
+  return Array.from(groups, ([indexId, items]) => ({ indexId, funds: items }));
+}
+
 export function sortFundRows(
   funds: FundComparisonRow[],
   sortKey: FundSortKey | null,
