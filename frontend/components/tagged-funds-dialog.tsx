@@ -143,8 +143,8 @@ export function TaggedFundsDialog({
                       <div>
                         <h3>{indexNames[group.indexId] ?? group.indexId}</h3>
                         <span>{group.funds.length} 个基金份额</span>
+                        {tag === "recurring" ? <RecurringTotal funds={group.funds} /> : null}
                       </div>
-                      {tag === "recurring" ? <RecurringTotal funds={group.funds} /> : null}
                     </header>
                     <div className="tagged-funds-table-wrap">
                       <table className="tagged-funds-table">

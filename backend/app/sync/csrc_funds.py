@@ -154,6 +154,9 @@ class CatalogSyncStats:
     shares: int
     snapshot_date: date
     failures: tuple[str, ...] = ()
+    fee_shares: int = 0
+    scales: int = 0
+    warnings: tuple[str, ...] = ()
 
 
 CSI_500 = TargetIndex(
@@ -1746,16 +1749,19 @@ def run_sync(
             time.min,
             tzinfo=ASIA_SHANGHAI,
         )
-        products = shares = 0
+        products = shares = fee_shares = scales = 0
         active_product_ids: list[int] = []
         failures: list[str] = []
+        warnings: list[str] = []
         with get_session_factory()() as session:
             ensure_index_master_data(session, snapshot_time, source_url=index_url)
             for candidate in candidates:
                 try:
                     with session.begin_nested():
                         fund_id = validate_fund_code(client, candidate.code)
-                        detail = fetch_fund_detail(client, fund_id)
+                        detail, detail_html = fetch_fund_detail_document(
+                            client, fund_id
+                        )
                         classified = classify_product(detail.full_name)
                         if classified is None:
                             continue
@@ -1767,7 +1773,74 @@ def run_sync(
                             target,
                             structure,
                         )
-                        product_id, _ = sync_catalog_candidate(
+
+                        exchange_traded: bool | None = None
+                        summaries: list[
+                            tuple[DisclosureDocument, ProductSummary]
+                        ] = []
+                        for document in disclosure_documents(
+                            detail_html, PRODUCT_SUMMARY_LABEL
+                        ):
+                            try:
+                                summary_text = fetch_disclosure_text(
+                                    client, document
+                                )
+                                if exchange_traded is None:
+                                    exchange_traded = is_exchange_traded_summary(
+                                        summary_text
+                                    )
+                                summaries.append(
+                                    (
+                                        document,
+                                        parse_product_summary(summary_text),
+                                    )
+                                )
+                            except (
+                                httpx.HTTPError,
+                                RuntimeError,
+                                ValueError,
+                            ) as exc:
+                                warnings.append(
+                                    f"{candidate.code} {document.title}: {exc}"
+                                )
+                        if exchange_traded:
+                            continue
+                        if not summaries:
+                            warnings.append(
+                                f"{candidate.code} {candidate.name}: "
+                                "no usable product summary"
+                            )
+
+                        scale_document: DisclosureDocument | None = None
+                        scale_records: list[ScaleRecord] = []
+                        quarterly_documents = disclosure_documents(
+                            detail_html, QUARTERLY_REPORT_LABEL
+                        )
+                        if quarterly_documents:
+                            scale_document = quarterly_documents[0]
+                            try:
+                                report_text = fetch_disclosure_text(
+                                    client, scale_document
+                                )
+                                scale_records = parse_quarterly_scales(
+                                    report_text
+                                )
+                            except (
+                                httpx.HTTPError,
+                                RuntimeError,
+                                ValueError,
+                            ) as exc:
+                                warnings.append(
+                                    f"{candidate.code} "
+                                    f"{scale_document.title}: {exc}"
+                                )
+                        else:
+                            warnings.append(
+                                f"{candidate.code} {candidate.name}: "
+                                "no quarterly report"
+                            )
+
+                        product_id, primary_share_id = sync_catalog_candidate(
                             session,
                             resolved_candidate,
                             detail,
@@ -1775,9 +1848,104 @@ def run_sync(
                             collected_at,
                             fund_detail_url(fund_id),
                         )
+                        summary_shares: dict[
+                            str, tuple[SummaryShare, str]
+                        ] = {}
+                        for document, summary in summaries:
+                            for summary_share in summary.shares:
+                                merge_summary_share(
+                                    summary_shares,
+                                    summary_share,
+                                    document.url,
+                                )
+                        benchmark = next(
+                            (
+                                summary.benchmark_description
+                                for _, summary in summaries
+                                if summary.benchmark_description
+                            ),
+                            None,
+                        )
+                        _, discovered_share_ids, _ = sync_fund(
+                            session,
+                            resolved_candidate,
+                            detail,
+                            [],
+                            summary_shares,
+                            snapshot_time,
+                            collected_at,
+                            benchmark,
+                        )
+                        share_ids = {
+                            candidate.code: primary_share_id,
+                            **discovered_share_ids,
+                        }
+
+                        rates_by_code: dict[
+                            str, tuple[dict[str, Decimal], str]
+                        ] = {}
+                        for document, summary in summaries:
+                            for code in summary.share_codes:
+                                rates_by_code.setdefault(
+                                    code,
+                                    (
+                                        summary.rates_by_code.get(
+                                            code, summary.rates
+                                        ),
+                                        document.url,
+                                    ),
+                                )
+                        common_rates: (
+                            tuple[dict[str, Decimal], str] | None
+                        ) = None
+                        if summaries:
+                            document, summary = summaries[0]
+                            common_rates = (
+                                {
+                                    fee_type: rate
+                                    for fee_type, rate in summary.rates.items()
+                                    if fee_type in {"management", "custody"}
+                                },
+                                document.url,
+                            )
+                        synced_fee_shares = 0
+                        for code, share_id in share_ids.items():
+                            rate_source = rates_by_code.get(code) or common_rates
+                            if rate_source is None:
+                                continue
+                            rates, source_url = rate_source
+                            sync_fee_history(
+                                session,
+                                share_id,
+                                rates,
+                                collected_at,
+                                source_url,
+                            )
+                            synced_fee_shares += 1
+
+                        synced_scales = 0
+                        for scale_record in scale_records:
+                            share_id = share_ids.get(scale_record.share_code)
+                            if share_id is None:
+                                warnings.append(
+                                    f"{candidate.code}: quarterly scale share "
+                                    f"{scale_record.share_code} was not discovered"
+                                )
+                                continue
+                            assert scale_document is not None
+                            sync_scale_history(
+                                session,
+                                share_id,
+                                scale_record,
+                                collected_at,
+                                scale_document.url,
+                            )
+                            synced_scales += 1
                         active_product_ids.append(product_id)
                     products += 1
-                    shares += 1
+                    shares += len(share_ids)
+                    fee_shares += synced_fee_shares
+                    scales += synced_scales
                 except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                     failures.append(f"{candidate.code} {candidate.name}: {exc}")
             if products == 0:
@@ -1815,7 +1983,15 @@ def run_sync(
                 session.rollback()
             else:
                 session.commit()
-    return CatalogSyncStats(products, shares, snapshot_date, tuple(failures))
+    return CatalogSyncStats(
+        products,
+        shares,
+        snapshot_date,
+        tuple(failures),
+        fee_shares,
+        scales,
+        tuple(warnings),
+    )
 
 
 def run_details_sync(
@@ -2008,82 +2184,9 @@ def run_details_sync(
                                 by_identity.values(),
                                 key=lambda item: (item.code, item.nav_date),
                             )
-                        exchange_traded: bool | None = None
-                        summaries: list[
-                            tuple[DisclosureDocument, ProductSummary]
-                        ] = []
-                        for document in disclosure_documents(
-                            detail_html, PRODUCT_SUMMARY_LABEL
-                        ):
-                            try:
-                                summary_text = fetch_disclosure_text(
-                                    client, document
-                                )
-                                if exchange_traded is None:
-                                    exchange_traded = is_exchange_traded_summary(
-                                        summary_text
-                                    )
-                                summaries.append(
-                                    (
-                                        document,
-                                        parse_product_summary(summary_text),
-                                    )
-                                )
-                            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                                warnings.append(
-                                    f"{candidate.code} {document.title}: {exc}"
-                                )
-                        if exchange_traded:
-                            continue
-                        if not summaries:
-                            warnings.append(
-                                f"{candidate.code} {candidate.name}: "
-                                "no usable product summary"
-                            )
-
-                        scale_document: DisclosureDocument | None = None
-                        scale_records: list[ScaleRecord] = []
-                        quarterly_documents = disclosure_documents(
-                            detail_html, QUARTERLY_REPORT_LABEL
-                        )
-                        if quarterly_documents:
-                            scale_document = quarterly_documents[0]
-                            try:
-                                report_text = fetch_disclosure_text(
-                                    client, scale_document
-                                )
-                                scale_records = parse_quarterly_scales(
-                                    report_text
-                                )
-                            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                                warnings.append(
-                                    f"{candidate.code} "
-                                    f"{scale_document.title}: {exc}"
-                                )
-                        else:
-                            warnings.append(
-                                f"{candidate.code} {candidate.name}: "
-                                "no quarterly report"
-                            )
-
-                        benchmark = next(
-                            (
-                                summary.benchmark_description
-                                for _, summary in summaries
-                                if summary.benchmark_description
-                            ),
-                            None,
-                        )
                         summary_shares: dict[
                             str, tuple[SummaryShare, str]
                         ] = {}
-                        for document, summary in summaries:
-                            for summary_share in summary.shares:
-                                merge_summary_share(
-                                    summary_shares,
-                                    summary_share,
-                                    document.url,
-                                )
                         announcements, announcement_warnings = (
                             fetch_subscription_announcements(
                                 client, detail_html
@@ -2196,7 +2299,7 @@ def run_details_sync(
                             summary_shares,
                             snapshot_time,
                             collected_at,
-                            benchmark,
+                            stored_product.benchmark_description,
                         )
                         synced_return_metrics = 0
                         metric_sources = {
@@ -2259,71 +2362,9 @@ def run_details_sync(
                             )
                             synced_subscription_states += 1
 
-                        rates_by_code: dict[
-                            str, tuple[dict[str, Decimal], str]
-                        ] = {}
-                        for document, summary in summaries:
-                            for code in summary.share_codes:
-                                rates_by_code.setdefault(
-                                    code,
-                                    (
-                                        summary.rates_by_code.get(
-                                            code, summary.rates
-                                        ),
-                                        document.url,
-                                    ),
-                                )
-                        common_rates: (
-                            tuple[dict[str, Decimal], str] | None
-                        ) = None
-                        if summaries:
-                            document, summary = summaries[0]
-                            common_rates = (
-                                {
-                                    fee_type: rate
-                                    for fee_type, rate in summary.rates.items()
-                                    if fee_type in {"management", "custody"}
-                                },
-                                document.url,
-                            )
-                        synced_fee_shares = 0
-                        for code, share_id in share_ids.items():
-                            rate_source = rates_by_code.get(code) or common_rates
-                            if rate_source is None:
-                                continue
-                            rates, source_url = rate_source
-                            sync_fee_history(
-                                session,
-                                share_id,
-                                rates,
-                                collected_at,
-                                source_url,
-                            )
-                            synced_fee_shares += 1
-
-                        synced_scales = 0
-                        for scale_record in scale_records:
-                            share_id = share_ids.get(scale_record.share_code)
-                            if share_id is None:
-                                warnings.append(
-                                    f"{candidate.code}: quarterly scale share "
-                                    f"{scale_record.share_code} was not discovered"
-                                )
-                                continue
-                            assert scale_document is not None
-                            sync_scale_history(
-                                session,
-                                share_id,
-                                scale_record,
-                                collected_at,
-                                scale_document.url,
-                            )
-                            synced_scales += 1
                     products += 1
                     shares += len(share_ids)
                     nav_rows += synced_nav
-                    fee_shares += synced_fee_shares
-                    scales += synced_scales
                     subscription_states += synced_subscription_states
                     return_metrics += synced_return_metrics
                 except (httpx.HTTPError, RuntimeError, ValueError) as exc:
@@ -2372,12 +2413,15 @@ def main() -> None:
     action = "validated" if args.dry_run else "synced"
     print(
         f"CSRC off-exchange script E catalog {action}: "
-        f"{stats.products} products, {stats.shares} primary shares, "
+        f"{stats.products} products, {stats.shares} shares, "
+        f"{stats.fee_shares} fee shares, {stats.scales} scales, "
         f"snapshot {stats.snapshot_date.isoformat()}, "
-        f"{len(stats.failures)} failures"
+        f"{len(stats.failures)} failures, {len(stats.warnings)} warnings"
     )
     for failure in stats.failures:
         print(f"WARNING {failure}")
+    for warning in stats.warnings:
+        print(f"WARNING {warning}")
 
 
 if __name__ == "__main__":

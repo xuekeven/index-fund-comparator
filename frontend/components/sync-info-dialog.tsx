@@ -16,17 +16,24 @@ interface SyncInfoDialogProps {
   onClose: () => void;
 }
 
+type ScriptTaskKey = Exclude<SyncTaskKey, "all">;
+
 const FRESHNESS_ROWS: Array<{
   key: keyof DataFreshness;
   label: string;
 }> = [
-  { key: "master", label: "基金主数据" },
+  { key: "master", label: "基金基本信息" },
   { key: "nav", label: "基金净值" },
-  { key: "quote", label: "场内行情" },
-  { key: "fee", label: "费率" },
+  { key: "quote", label: "场内收盘价" },
+  { key: "fee", label: "运作费率" },
   { key: "scale", label: "基金规模" },
-  { key: "metric", label: "收益指标" },
+  { key: "metric", label: "区间收益率" },
   { key: "subscription", label: "申购状态" },
+];
+
+const FRESHNESS_TABLE_ROWS = [
+  FRESHNESS_ROWS.slice(0, 4),
+  FRESHNESS_ROWS.slice(4, 8),
 ];
 
 function formatFreshness(value: string | null) {
@@ -69,7 +76,7 @@ function SyncHistoryDialog({
   task,
   onClose,
 }: {
-  task: SyncTaskKey;
+  task: ScriptTaskKey;
   onClose: () => void;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -126,7 +133,7 @@ function SyncHistoryDialog({
           <div>
             <span className="section-kicker">最近 7 天</span>
             <h2 id="sync-history-title">
-              {task === "all" ? "所有同步" : `脚本 ${task}`} 执行历史
+              脚本 {task} 执行历史
             </h2>
           </div>
           <button
@@ -178,43 +185,123 @@ function SyncHistoryDialog({
 
 const SYNC_ROWS: Array<{
   scope: string;
-  tasks: Array<{ key: Exclude<SyncTaskKey, "all">; description: string }>;
+  tasks: Array<{
+    key: ScriptTaskKey;
+    schedule: string;
+    sources: Array<{ label: string; url: string; description: string }>;
+    ending?: string;
+  }>;
 }> = [
   {
     scope: "场内基金 · 上交所",
     tasks: [
-      { key: "A", description: "每周一 09:00：读取基金列表，筛选目标基金并更新基金主数据。" },
-      { key: "B", description: "周一至周五 16:00：更新行情、净值、费率、规模、交易日和区间收益率。" },
+      {
+        key: "A",
+        schedule: "每周一 09:00",
+        sources: [
+          {
+            label: "上交所",
+            url: "https://etf.sse.com.cn/fundlist/",
+            description: "读取基金列表，筛选目标基金，获取代码、名称、管理人、跟踪指数、上市日期等基本信息",
+          },
+          {
+            label: "证监会基金电子披露网站",
+            url: "http://eid.csrc.gov.cn/fund",
+            description: "获取每个目标基金的产品资料概要，获取运作费率（管理费+托管费）",
+          },
+        ],
+      },
+      {
+        key: "B",
+        schedule: "周一至周五 16:00",
+        sources: [{
+          label: "上交所",
+          url: "https://etf.sse.com.cn/fundlist/",
+          description: "获取收盘价、基金净值、基金规模和交易日期",
+        }],
+        ending: "；根据净值计算区间收益率。",
+      },
     ],
   },
   {
     scope: "场内基金 · 深交所",
     tasks: [
-      { key: "C", description: "每周一 09:00：读取基金列表，筛选目标基金，并更新主数据和产品概要费率。" },
-      { key: "D", description: "周一至周五 22:00：更新行情、净值、规模、交易日和区间收益率。" },
+      {
+        key: "C",
+        schedule: "每周一 09:00",
+        sources: [
+          {
+            label: "深交所",
+            url: "https://www.szse.cn/www/market/product/list/etfList/index.html",
+            description: "读取基金列表，筛选目标基金，获取代码、名称、管理人、跟踪指数和上市信息",
+          },
+          {
+            label: "证监会基金电子披露网站",
+            url: "http://eid.csrc.gov.cn/fund",
+            description: "获取每个目标基金的产品资料概要，获取运作费率（管理费+托管费）",
+          },
+        ],
+      },
+      {
+        key: "D",
+        schedule: "周一至周五 22:00",
+        sources: [
+          {
+            label: "深交所",
+            url: "https://www.szse.cn/www/market/product/list/etfList/index.html",
+            description: "获取收盘价、基金净值、基金份额规模和交易日期",
+          },
+          {
+            label: "证监会基金电子披露网站",
+            url: "http://eid.csrc.gov.cn/fund",
+            description: "补充正式净值",
+          },
+        ],
+        ending: "；结合净值估算基金规模，并计算区间收益率。",
+      },
     ],
   },
   {
     scope: "场外基金",
     tasks: [
-      { key: "E", description: "每月 1 日 09:00：读取证监会公募基金目录，筛选目标基金并更新基金和主份额。" },
-      { key: "F", description: "周一至周五 22:00：更新产品概要费率、季度规模、正式净值、申购状态和区间收益率。" },
+      {
+        key: "E",
+        schedule: "每月 1 日 09:00",
+        sources: [
+          {
+            label: "中国证监会",
+            url: "https://www.csrc.gov.cn/csrc/c101900/c1029655/content.shtml",
+            description: "读取公募基金目录，筛选目标基金，获取代码、名称和类型",
+          },
+          {
+            label: "证监会基金电子披露网站",
+            url: "http://eid.csrc.gov.cn/fund",
+            description: "补充管理人以及 A/C 类、人民币/美元等份额信息，并获取每个份额的产品资料概要，获取运作费率（管理费+托管费+销售服务费）和季度基金规模",
+          },
+        ],
+      },
+      {
+        key: "F",
+        schedule: "周一至周五 22:00",
+        sources: [{
+          label: "证监会基金电子披露网站",
+          url: "http://eid.csrc.gov.cn/fund",
+          description: "获取正式净值和申购状态",
+        }],
+        ending: "；根据正式净值计算区间收益率。",
+      },
     ],
   },
 ];
 
 function statusLabel(
-  task: SyncTaskKey,
+  task: ScriptTaskKey,
   snapshot: SyncTaskSnapshot | null,
 ) {
   const state = snapshot?.tasks[task];
   if (!state || state.status === "idle") return null;
   if (state.status === "queued") return "等待执行";
-  if (state.status === "running") {
-    return task === "all" && snapshot?.currentScript
-      ? `正在执行脚本 ${snapshot.currentScript}`
-      : "执行中";
-  }
+  if (state.status === "running") return "执行中";
   return state.status === "succeeded" ? null : "执行失败";
 }
 
@@ -224,9 +311,9 @@ export function SyncInfoDialog({
 }: SyncInfoDialogProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [snapshot, setSnapshot] = useState<SyncTaskSnapshot | null>(null);
-  const [startingTask, setStartingTask] = useState<SyncTaskKey | null>(null);
+  const [startingTask, setStartingTask] = useState<ScriptTaskKey | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
-  const [historyTask, setHistoryTask] = useState<SyncTaskKey | null>(null);
+  const [historyTask, setHistoryTask] = useState<ScriptTaskKey | null>(null);
 
   const refreshStatus = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -267,7 +354,7 @@ export function SyncInfoDialog({
     };
   }, [onClose]);
 
-  async function runTask(task: SyncTaskKey) {
+  async function runTask(task: ScriptTaskKey) {
     setStartingTask(task);
     setRunError(null);
     try {
@@ -280,7 +367,7 @@ export function SyncInfoDialog({
     }
   }
 
-  function taskControl(task: SyncTaskKey, buttonLabel = "执行") {
+  function taskControl(task: ScriptTaskKey) {
     const state = snapshot?.tasks[task];
     const label = statusLabel(task, snapshot);
     const busy = Boolean(snapshot?.activeJob) || startingTask !== null;
@@ -291,15 +378,15 @@ export function SyncInfoDialog({
           type="button"
           disabled={busy}
           onClick={() => void runTask(task)}
-          aria-label={task === "all" ? "执行脚本 A 到 F" : `执行脚本 ${task}`}
+          aria-label={`执行脚本 ${task}`}
         >
-          {startingTask === task ? "启动中" : buttonLabel}
+          {startingTask === task ? "启动中" : "执行"}
         </button>
         <button
           className="sync-history-button"
           type="button"
           onClick={() => setHistoryTask(task)}
-          aria-label={task === "all" ? "查看所有同步执行历史" : `查看脚本 ${task} 执行历史`}
+          aria-label={`查看脚本 ${task} 执行历史`}
         >
           历史
         </button>
@@ -329,10 +416,7 @@ export function SyncInfoDialog({
         <header className="comparison-header">
           <div>
             <span className="section-kicker">数据说明</span>
-            <div className="sync-info-title-row">
-              <h2 id="sync-info-title">数据同步机制</h2>
-              {taskControl("all", "执行所有同步")}
-            </div>
+            <h2 id="sync-info-title">数据同步机制</h2>
           </div>
           <button
             ref={closeButtonRef}
@@ -348,27 +432,73 @@ export function SyncInfoDialog({
         <div className="sync-info-content">
           {runError && <p className="sync-run-error">{runError}</p>}
           <section className="sync-info-section">
-            <h3>当前筛选数据的采集时间</h3>
-            <dl className="sync-freshness-grid">
-              {FRESHNESS_ROWS.map(({ key, label }) => (
-                <div key={key}>
-                  <dt>{label}</dt>
-                  <dd>{formatFreshness(dataFreshness[key])}</dd>
-                </div>
-              ))}
-            </dl>
+            <h3 id="sync-freshness-title">当前筛选数据的采集时间</h3>
+            <div className="sync-freshness-table-wrap">
+              <table className="sync-freshness-table" aria-labelledby="sync-freshness-title">
+                <tbody>
+                  {FRESHNESS_TABLE_ROWS.map((items, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {items.map(({ key, label }) => (
+                        <td key={key}>
+                          <div className="sync-freshness-cell">
+                            <span>{label}</span>
+                            <strong>{formatFreshness(dataFreshness[key])}</strong>
+                          </div>
+                        </td>
+                      ))}
+                      {items.length < 4 && <td aria-hidden="true" />}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
           {SYNC_ROWS.map((row) => (
             <section key={row.scope} className="sync-info-section">
               <h3>{row.scope}</h3>
-              {row.tasks.map((task) => (
-                <div key={task.key} className="sync-task-line">
-                  <p>
-                    {task.description}
-                    {taskControl(task.key)}
-                  </p>
-                </div>
-              ))}
+              <div className="sync-task-table-wrap">
+                <table className="sync-task-table">
+                  <thead>
+                    <tr>
+                      <th>执行时间</th>
+                      <th>数据来源与更新内容</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {row.tasks.map((task, taskIndex) => (
+                      <tr key={task.key}>
+                        <td>{task.schedule}</td>
+                        <td>
+                          {task.sources.map((source, index) => (
+                            <span
+                              key={`${task.key}-${source.label}`}
+                              className={taskIndex === 0 ? "sync-task-source-line" : undefined}
+                            >
+                              {index > 0 && taskIndex !== 0 ? "；" : ""}
+                              {(taskIndex === 0 || index === 0) && (
+                                <strong className="sync-task-step">
+                                  {taskIndex === 0
+                                    ? index === 0 ? "第一步：" : "第二步："
+                                    : "第三步："}
+                                </strong>
+                              )}
+                              从{" "}
+                              <a href={source.url} target="_blank" rel="noreferrer">
+                                {source.label}
+                              </a>
+                              {" "}{source.description}
+                              {taskIndex === 0 ? "。" : ""}
+                            </span>
+                          ))}
+                          {task.ending ?? (taskIndex === 0 ? "" : "。")}
+                        </td>
+                        <td>{taskControl(task.key)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </section>
           ))}
 

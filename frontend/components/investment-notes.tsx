@@ -11,14 +11,12 @@ import {
 } from "@/lib/api";
 import type {
   InvestmentNote,
-  InvestmentNoteAction,
   InvestmentNoteCategory,
   InvestmentNotePayload,
 } from "@/lib/types";
 import { SearchIcon } from "./icons";
 
 const CATEGORY_OPTIONS: InvestmentNoteCategory[] = ["长期", "实时"];
-const ACTION_OPTIONS: InvestmentNoteAction[] = ["加仓", "减仓", "清仓", "持有", "观察"];
 const SOURCE_OPTIONS = ["自我总结", "教主-群聊", "教主-微博", "猫笔刀-日报", "仓鼠投资-微博"] as const;
 
 type NoteDraft = Omit<InvestmentNotePayload, "tags" | "indexIds" | "fundCodes"> & {
@@ -211,7 +209,6 @@ function NoteReader({ note, active, saving, onEdit, onDelete }: NoteReaderProps)
                 {note.sourceUrl ? <a href={note.sourceUrl} target="_blank" rel="noreferrer">{note.sourceName}</a> : <strong>{note.sourceName}</strong>}
               </span>
             )}
-            {note.action && <i className="action">{note.action}</i>}
           </div>
           <div className="note-title-row">
             <h2><mark>{note.title}</mark></h2>
@@ -448,7 +445,6 @@ export function InvestmentNotes() {
           <div>
             <span className="section-kicker">复盘与判断</span>
             <h1 id="notes-title">投资笔记</h1>
-            <p>把来源观点、自己的判断和复盘记录分开整理。</p>
           </div>
           <div className="notes-heading-actions">
             <button className="notes-new-button" type="button" onClick={startNew}>＋ 新建笔记</button>
@@ -551,16 +547,13 @@ export function InvestmentNotes() {
                   <div className="note-form-control"><span>日期</span><NoteDateField value={draft.noteDate} open={openSelect === "date"} onOpenChange={(open) => setOpenSelect(open ? "date" : null)} onChange={(value) => setDraft({ ...draft, noteDate: value })} /></div>
                   <label><span>标题</span><input required maxLength={200} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：07-21 加减仓" /></label>
                   <div className="note-form-control"><span>类型</span><NoteSelect id="note-category" value={draft.category} options={CATEGORY_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "category"} onOpenChange={(open) => setOpenSelect(open ? "category" : null)} onChange={(value) => setDraft({ ...draft, category: value as InvestmentNoteCategory })} /></div>
-                  <div className="note-form-control"><span>行动观点</span><NoteSelect id="note-action" value={draft.action ?? ""} options={[[ "", "暂无" ] as const, ...ACTION_OPTIONS.map((item) => [item, item] as const)]} open={openSelect === "action"} onOpenChange={(open) => setOpenSelect(open ? "action" : null)} onChange={(value) => setDraft({ ...draft, action: value ? value as InvestmentNoteAction : null })} /></div>
+                  <label><span>标签</span><input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="QDII、风控、估值" /></label>
                   <div className="note-form-control"><span>来源</span><NoteSelect id="note-source" value={draft.sourceName ?? ""} options={SOURCE_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "source"} onOpenChange={(open) => setOpenSelect(open ? "source" : null)} onChange={(value) => setDraft({ ...draft, sourceName: value, ownSummary: value === "自我总结" ? "" : draft.ownSummary })} /></div>
                   <label><span>来源链接</span><input value={draft.sourceUrl ?? ""} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} placeholder="https://…" /></label>
                 </div>
                 <label className="note-form-field"><span>观点归纳</span><textarea rows={3} value={draft.sourceExcerpt ?? ""} onChange={(event) => setDraft({ ...draft, sourceExcerpt: event.target.value })} placeholder="每行可用“- ”开头记录一个观点" /></label>
                 {draft.sourceName !== "自我总结" && <label className="note-form-field"><span>自我总结</span><textarea rows={3} value={draft.ownSummary ?? ""} onChange={(event) => setDraft({ ...draft, ownSummary: event.target.value })} placeholder="写下自己的判断、依据和失效条件" /></label>}
                 <label className="note-form-field"><span>观察计划</span><textarea rows={3} value={draft.contentMarkdown} onChange={(event) => setDraft({ ...draft, contentMarkdown: event.target.value })} placeholder="交易计划、复盘结果或后续观察…" /></label>
-                <div className="note-form-grid note-form-grid-single">
-                  <label><span>标签</span><input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="QDII、风控、估值" /></label>
-                </div>
                 <div className="note-editor-actions"><button type="button" disabled={saving} onClick={() => { setEditing(null); setOpenSelect(null); }}>取消</button><button className="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存笔记"}</button></div>
               </form>
             </div>

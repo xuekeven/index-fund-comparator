@@ -7,8 +7,8 @@ from app.sync_history import run_tracked_sync
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Script F: sync details, NAV, fees, scales, subscription states, "
-            "and returns for script E targets"
+            "Script F: sync details, NAV, subscription states, and returns "
+            "for script E targets"
         )
     )
     parser.add_argument(
@@ -36,7 +36,6 @@ def main() -> None:
     print(
         f"CSRC off-exchange script F details {action}: "
         f"{stats.products} products, {stats.shares} shares, "
-        f"{stats.fee_shares} fee shares, {stats.scales} scales, "
         f"{stats.nav_rows} NAV rows, "
         f"{stats.subscription_states} subscription states, "
         f"{stats.return_metrics} return metrics, "

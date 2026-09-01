@@ -23,10 +23,6 @@ from app.database_models import (
     MarketQuote,
     NavDaily,
 )
-from app.sync.eid_disclosures import (
-    fetch_latest_product_summary_rates,
-    sync_fee_history,
-)
 from app.sync_history import run_tracked_sync
 from app.sync.sse_funds import (
     ASIA_SHANGHAI,
@@ -228,13 +224,7 @@ def fetch_detail_info(
         headers={"Referer": detail_url},
     )
     response.raise_for_status()
-    detail = parse_sse_detail_info(response.json())
-    try:
-        pdf_rates, source_url = fetch_latest_product_summary_rates(client, code)
-    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-        logger.warning("SSE %s product summary fee unavailable: %s", code, exc)
-        return detail
-    return merge_product_summary_fee_rates(detail, pdf_rates, source_url)
+    return parse_sse_detail_info(response.json())
 
 
 def fetch_snapshot(
@@ -481,14 +471,6 @@ def run_sync(*, dry_run: bool = False) -> tuple[int, list[date]]:
                     )
 
                 with session.begin_nested():
-                    if detail.fee_rates and detail.fee_source_url is not None:
-                        sync_fee_history(
-                            session,
-                            share_id,
-                            detail.fee_rates,
-                            collected_at,
-                            detail.fee_source_url,
-                        )
                     sync_nav_daily(
                         session,
                         share_id,

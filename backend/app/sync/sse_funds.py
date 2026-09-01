@@ -1,4 +1,5 @@
 import argparse
+import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
@@ -20,6 +21,10 @@ from app.database_models import (
     NavDaily,
 )
 from app.sync_history import run_tracked_sync
+from app.sync.eid_disclosures import (
+    fetch_latest_product_summary_rates,
+    sync_fee_history,
+)
 
 
 SSE_LIST_URL = "https://query.sse.com.cn/commonQuery.do"
@@ -28,6 +33,7 @@ SSE_FUND_BASE_INFO_SQL_ID = "COMMON_JJZWZ_JJLB_JJXQ_JBXX_C"
 SSE_FUND_NAV_URL = "https://yunhq.sse.com.cn:32042/v1/sh1/dayk"
 SSE_USER_AGENT = "index-fund-comparator/0.1"
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -395,12 +401,59 @@ def sync_rows(
     return synced
 
 
+def sync_target_fees(
+    session: Session,
+    client: httpx.Client,
+    rows: list[dict[str, Any]],
+    collected_at: datetime,
+) -> tuple[int, list[str]]:
+    synced = 0
+    failures: list[str] = []
+    for row in rows:
+        if classify(row) is None or not row.get("FUND_CODE"):
+            continue
+        code = str(row["FUND_CODE"])
+        share_id = session.scalar(
+            select(FundShareClass.id).where(FundShareClass.code == code)
+        )
+        if share_id is None:
+            failures.append(f"{code}: active share class was not found")
+            continue
+        try:
+            rates, source_url = fetch_latest_product_summary_rates(client, code)
+            with session.begin_nested():
+                sync_fee_history(
+                    session,
+                    share_id,
+                    rates,
+                    collected_at,
+                    source_url,
+                )
+            synced += 1
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            failures.append(f"{code}: {exc}")
+    return synced, failures
+
+
 def run_sync(*, dry_run: bool = False) -> int:
     collected_at = datetime.now(UTC)
     rows = fetch_sse_funds()
-    with get_session_factory()() as session:
+    with get_session_factory()() as session, httpx.Client(
+        trust_env=False,
+        timeout=httpx.Timeout(30, connect=10),
+        headers={"User-Agent": SSE_USER_AGENT},
+    ) as client:
         ensure_index_master_data(session, collected_at)
         count = sync_rows(session, rows, collected_at)
+        fee_count, fee_failures = sync_target_fees(
+            session,
+            client,
+            rows,
+            collected_at,
+        )
+        logger.info("SSE weekly fee sync updated %s shares", fee_count)
+        for failure in fee_failures:
+            logger.warning("SSE weekly fee sync skipped %s", failure)
         if dry_run:
             session.rollback()
         else:
