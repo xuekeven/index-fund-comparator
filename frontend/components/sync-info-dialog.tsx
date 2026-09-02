@@ -300,8 +300,7 @@ function statusLabel(
 ) {
   const state = snapshot?.tasks[task];
   if (!state || state.status === "idle") return null;
-  if (state.status === "queued") return "等待执行";
-  if (state.status === "running") return "执行中";
+  if (state.status === "queued" || state.status === "running") return null;
   return state.status === "succeeded" ? null : "执行失败";
 }
 
@@ -371,6 +370,11 @@ export function SyncInfoDialog({
     const state = snapshot?.tasks[task];
     const label = statusLabel(task, snapshot);
     const busy = Boolean(snapshot?.activeJob) || startingTask !== null;
+    const runLabel = startingTask === task || state?.status === "running"
+      ? "执行中"
+      : state?.status === "queued"
+        ? "等待执行"
+        : "执行";
     return (
       <span className="sync-task-control">
         <button
@@ -380,7 +384,7 @@ export function SyncInfoDialog({
           onClick={() => void runTask(task)}
           aria-label={`执行脚本 ${task}`}
         >
-          {startingTask === task ? "启动中" : "执行"}
+          {runLabel}
         </button>
         <button
           className="sync-history-button"

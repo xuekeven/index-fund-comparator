@@ -403,7 +403,7 @@ a { color: inherit; text-decoration: none; }
 .sync-task-status.succeeded { color: var(--green); }
 .sync-task-status.failed { color: var(--red); }
 .sync-task-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
-.sync-task-table { width: 100%; min-width: 720px; border-collapse: collapse; table-layout: fixed; }
+.sync-task-table { width: 100%; min-width: 850px; border-collapse: collapse; table-layout: fixed; }
 .sync-task-table th, .sync-task-table td {
   padding: 11px 13px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
   text-align: left; vertical-align: middle; font-size: 12px; line-height: 1.7;
@@ -412,7 +412,8 @@ a { color: inherit; text-decoration: none; }
 .sync-task-table tbody tr:last-child td { border-bottom: 0; }
 .sync-task-table th { color: #65716b; background: #f7f9f7; font-weight: 650; }
 .sync-task-table th:first-child { width: 120px; }
-.sync-task-table th:last-child { width: 80px; }
+.sync-task-table th:nth-child(2) { width: 630px; }
+.sync-task-table th:last-child { width: 100px; }
 .sync-task-table th:last-child, .sync-task-table td:last-child { padding-inline: 8px; }
 .sync-task-table td { color: var(--muted); }
 .sync-task-table td:first-child { color: var(--ink); white-space: nowrap; }

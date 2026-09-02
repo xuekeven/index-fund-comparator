@@ -11,6 +11,8 @@ from openpyxl import Workbook
 from app.sync.csrc_funds import (
     ScaleRecord,
     classify_product,
+    current_announcement_shares,
+    current_product_share_codes,
     discover_subscription_shares,
     DisclosureDocument,
     disclosure_documents,
@@ -27,12 +29,14 @@ from app.sync.csrc_funds import (
     parse_product_summary,
     parse_quarterly_scales,
     parse_subscription_announcement,
+    product_summary_documents,
     resolve_subscription_states,
     share_identity,
     should_retire_stale_catalog_products,
     SummaryShare,
     snapshot_date_from_url,
     subscription_documents,
+    subscription_as_of_date,
     SubscriptionState,
     sync_subscription_state,
 )
@@ -66,6 +70,33 @@ def test_stale_catalog_retirement_runs_only_for_complete_full_sync() -> None:
     assert not should_retire_stale_catalog_products(
         failures=["download failed"], codes=(), limit=None
     )
+
+
+def test_current_share_sources_exclude_historical_announcement_only_codes() -> None:
+    announcement_shares = {
+        code: (
+            SummaryShare(code, name, share_class, "人民币", None),
+            f"https://example.test/{code}.pdf",
+        )
+        for code, name, share_class in (
+            ("164809", "工银中证500ETF联接A", "A"),
+            ("007223", "工银中证500ETF联接C", "C"),
+            ("150055", "500A", "A"),
+            ("150056", "500B", "B"),
+        )
+    }
+
+    current_codes = current_product_share_codes(
+        "164809",
+        {
+            code: announcement_shares[code]
+            for code in ("164809", "007223")
+        },
+        {"164809", "007223"},
+    )
+    filtered = current_announcement_shares(announcement_shares, current_codes)
+
+    assert set(filtered) == {"164809", "007223"}
 
 
 def test_nav_query_uses_the_endpoint_page_limit() -> None:
@@ -278,6 +309,62 @@ def test_extracts_disclosure_documents_by_type_and_deduplicates() -> None:
     )
     assert len(reports) == 1
     assert reports[0].title == "2026年第2季度报告"
+
+
+def test_product_summary_search_includes_file_omitted_by_detail_preview() -> None:
+    requested: dict[str, object] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {
+                "aaData": [
+                    {
+                        "reportName": (
+                            "摩根标普500指数(QDII)人民币C份额"
+                            "基金产品资料概要更新"
+                        ),
+                        "uploadInfoId": 1502143,
+                    },
+                    {
+                        "reportName": "摩根标普500指数招募说明书更新",
+                        "uploadInfoId": 1502159,
+                    },
+                ]
+            }
+
+    class Client:
+        def get(self, url: str, *, params: dict[str, str]) -> Response:
+            requested.update(url=url, params=params)
+            return Response()
+
+    detail_html = (
+        '<a href="instance_show_pdf_id.do?instanceid=1502144">'
+        "人民币A基金产品资料概要更新</a>"
+    )
+    documents = product_summary_documents(  # type: ignore[arg-type]
+        Client(), detail_html, "017641", date(2026, 9, 2)
+    )
+
+    assert [document.url for document in documents] == [
+        (
+            "http://eid.csrc.gov.cn/fund/disclose/"
+            "instance_show_pdf_id.do?instanceid=1502143"
+        ),
+        (
+            "http://eid.csrc.gov.cn/fund/disclose/"
+            "instance_show_pdf_id.do?instanceid=1502144"
+        ),
+    ]
+    query = {
+        item["name"]: item["value"]
+        for item in json.loads(requested["params"]["aoData"])  # type: ignore[index]
+    }
+    assert query["fundCode"] == "017641"
+    assert query["startUploadDate"] == "2025-07-29"
+    assert query["endUploadDate"] == "2026-09-02"
 
 
 def test_parses_product_summary_fees_codes_and_benchmark() -> None:
@@ -544,6 +631,144 @@ def test_preserves_pdf_table_columns_for_equal_subscription_limits() -> None:
     ]
 
 
+def test_parses_per_share_account_daily_limit_for_all_share_classes() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("007721", "天弘标普500发起（QDII-FOF）A", "A", "人民币", None),
+            SummaryShare("007722", "天弘标普500发起（QDII-FOF）C", "C", "人民币", None),
+            SummaryShare("022523", "天弘标普500发起（QDII-FOF）D", "D", "人民币", None),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "天弘标普500发起式证券投资基金（QDII-FOF）恢复申购、定期定额投资业务及限制大额申购、定期定额投资业务的公告",
+        """公告送出日期：2026 年 9 月 1 日
+恢复申购日 2026 年 9 月 2 日
+下属分级基金的交易代码 007721 007722 022523
+本公司决定自 2026 年 9 月 2 日起恢复办理本基金的申购业务并限制大额申购业务，
+且单个基金账户单日累计申购单个基金份额的金额不得超过 100 元。
+""",
+        shares,
+        "http://eid.csrc.gov.cn/fund/disclose/instance_show_pdf_id.do?instanceid=1573957",
+    )
+
+    assert [(state.code, state.limit_amount) for state in states] == [
+        ("007721", Decimal("100")),
+        ("007722", Decimal("100")),
+        ("022523", Decimal("100")),
+    ]
+
+
+def test_parses_scaled_limit_table_and_scopes_listed_share_codes() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("001052", "华夏中证500ETF联接A", "A", "人民币", None),
+            SummaryShare("006382", "华夏中证500ETF联接C", "C", "人民币", None),
+            SummaryShare("022958", "华夏中证500ETF联接Y", "Y", "人民币", None),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "华夏中证500ETF联接基金限制申购、定期定额申购及转换转入业务上限的公告",
+        """公告送出日期：2024 年 11 月 19 日
+限制申购、定期定额申购及转换转入起始日 2024 年 11 月 19 日
+各基金份额类别的交易代码 001052 006382
+该基金份额类别是否限制申购、定期定额申购及转换转入 是 是
+该基金份额类别限制申购（含定期定额申购）及转换转入金额（单位：亿元）
+1.25 1.25
+2 其他需要提示的事项
+""",
+        shares,
+        "http://eid.csrc.gov.cn/fund/disclose/instance_show_pdf_id.do?instanceid=1188165",
+    )
+
+    assert [(state.code, state.limit_amount) for state in states] == [
+        ("001052", Decimal("125000000.00")),
+        ("006382", Decimal("125000000.00")),
+    ]
+
+
+def test_parses_product_wide_limit_with_yuan_unit_and_ascii_colon() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("006611", "人保中证500A", "A", "人民币", None),
+            SummaryShare("023498", "人保中证500C", "C", "人民币", None),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "人保中证500指数型证券投资基金暂停大额申购、定期定额投资业务的公告",
+        """送出日期：2019年10月29日
+暂停大额申购起始日 2019-10-29
+限制申购金额（单位:人民币元） 5,000,000.00
+""",
+        shares,
+        "http://eid.csrc.gov.cn/fund/disclose/instance_show_pdf_id.do?instanceid=15913",
+    )
+
+    assert [(state.code, state.limit_amount) for state in states] == [
+        ("006611", Decimal("5000000.00")),
+        ("023498", Decimal("5000000.00")),
+    ]
+
+
+def test_parses_plain_yuan_unit_for_single_share_limit() -> None:
+    shares = {
+        "160213": SummaryShare(
+            "160213", "国泰纳斯达克100指数(QDII)", "I", "人民币", None
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "关于国泰纳斯达克100指数证券投资基金调整大额申购及定期定额投资业务金额限制的公告",
+        """公告送出日期：2026 年 9 月 1 日
+调整大额申购业务金额限制起始日 2026 年 9 月 1 日
+限制申购金额（单位：元） 100.00
+""",
+        shares,
+        "http://eid.csrc.gov.cn/fund/disclose/instance_show_pdf_id.do?instanceid=1573592",
+    )
+
+    assert [(state.code, state.limit_amount) for state in states] == [
+        ("160213", Decimal("100.00")),
+    ]
+
+
+def test_parses_open_daily_subscription_and_parenthesized_large_resume() -> None:
+    pension_shares = {
+        share.code: share
+        for share in (
+            SummaryShare("001052", "华夏中证500ETF联接A", "A", "人民币", None),
+            SummaryShare("006382", "华夏中证500ETF联接C", "C", "人民币", None),
+            SummaryShare("022958", "华夏中证500ETF联接Y", "Y", "人民币", None),
+        )
+    }
+    opened = parse_subscription_announcement(
+        "华夏中证500ETF联接基金Y类基金份额开放日常申购、赎回、转换、定期定额申购业务的公告",
+        "公告送出日期：2024年12月13日申购起始日2024年12月13日",
+        pension_shares,
+        "https://example.test/open.pdf",
+    )
+    resumed = parse_subscription_announcement(
+        "人保中证500基金恢复（大额）申购（转换转入、赎回、转换转出、定期定额投资）公告",
+        "送出日期：2020年4月7日恢复大额申购日2020-04-08",
+        {
+            "006611": SummaryShare(
+                "006611", "人保中证500A", "A", "人民币", None
+            )
+        },
+        "https://example.test/resume.pdf",
+    )
+
+    assert [(state.code, state.status) for state in opened] == [("022958", "open")]
+    assert [
+        (state.code, state.status, state.effective_date) for state in resumed
+    ] == [("006611", "open", date(2020, 4, 8))]
+
+
 def test_parses_wanjia_multiline_subscription_limit_table() -> None:
     shares = {
         share.code: share
@@ -756,6 +981,12 @@ def test_authoritative_subscription_sync_does_not_replace_known_amount_with_null
     assert correct_state.collected_at == collected_at
     assert downgraded_state.effective_to == effective_from
     assert session.added == []
+
+
+def test_subscription_date_uses_collection_day_not_lagging_nav_day() -> None:
+    collected_at = datetime(2026, 9, 1, 16, 30, tzinfo=UTC)
+
+    assert subscription_as_of_date(collected_at) == date(2026, 9, 2)
 
 
 def test_resolves_subscription_state_by_effective_date_not_document_order() -> None:

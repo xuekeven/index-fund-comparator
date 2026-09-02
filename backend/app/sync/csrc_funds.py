@@ -46,6 +46,7 @@ CSRC_INDEX_PAGE_URL = "https://www.csrc.gov.cn/csrc/c101900/c1029655/content.sht
 EID_BASE_URL = "http://eid.csrc.gov.cn/fund"
 EID_VALIDATE_URL = f"{EID_BASE_URL}/disclose/validate_fund.do"
 EID_DETAIL_URL = f"{EID_BASE_URL}/disclose/fund_detail.do"
+EID_ADVANCED_SEARCH_URL = f"{EID_BASE_URL}/disclose/advanced_search_report.do"
 EID_SEARCH_META_URL = f"{EID_BASE_URL}/disclose/publicDailyReportSearchData.json"
 EID_NAV_URL = f"{EID_BASE_URL}/disclose/getPublicFundJZInfoMore.do"
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -386,6 +387,55 @@ def disclosure_documents(page_html: str, title_token: str) -> list[DisclosureDoc
     )
 
 
+def product_summary_documents(
+    client: httpx.Client,
+    detail_html: str,
+    fund_code: str,
+    end_date: date,
+) -> list[DisclosureDocument]:
+    """Return current summaries, including files omitted by the detail-page preview."""
+    query = [
+        {"name": "sEcho", "value": 1},
+        {"name": "iDisplayStart", "value": 0},
+        {"name": "iDisplayLength", "value": 100},
+        {"name": "fundType", "value": ""},
+        {"name": "reportType", "value": "FA"},
+        {"name": "reportYear", "value": ""},
+        {"name": "fundCompanyShortName", "value": ""},
+        {"name": "fundCode", "value": fund_code},
+        {"name": "fundShortName", "value": ""},
+        {
+            "name": "startUploadDate",
+            "value": (end_date - timedelta(days=400)).isoformat(),
+        },
+        {"name": "endUploadDate", "value": end_date.isoformat()},
+    ]
+    response = client.get(
+        EID_ADVANCED_SEARCH_URL,
+        params={"aoData": json.dumps(query, ensure_ascii=False)},
+    )
+    response.raise_for_status()
+
+    documents: list[DisclosureDocument] = []
+    for row in response.json().get("aaData", []):
+        title = str(row.get("reportName") or "").strip()
+        instance_id = row.get("uploadInfoId")
+        if PRODUCT_SUMMARY_LABEL not in title or instance_id is None:
+            continue
+        documents.append(
+            DisclosureDocument(
+                title=title,
+                url=(
+                    f"{EID_BASE_URL}/disclose/instance_show_pdf_id.do"
+                    f"?instanceid={int(instance_id)}"
+                ),
+            )
+        )
+
+    documents.extend(disclosure_documents(detail_html, PRODUCT_SUMMARY_LABEL))
+    return list({document.url: document for document in documents}.values())
+
+
 def _code_chunks(value: str) -> tuple[str, ...]:
     return tuple(value[index:index + 6] for index in range(0, len(value), 6))
 
@@ -546,7 +596,8 @@ def parse_product_summary(text: str) -> ProductSummary:
 def _announcement_date(compact: str) -> date:
     date_pattern = r"(20\d{2})[年/-](\d{1,2})[月/-](\d{1,2})日?"
     effective_match = re.search(
-        rf"(?:暂停(?:大额)?申购起始日|恢复(?:大额)?申购起始日|自)"
+        rf"(?:暂停(?:[（(]?大额[）)]?)?申购起始日|"
+        rf"恢复(?:[（(]?大额[）)]?)?申购(?:起始)?日|自)"
         rf".{{0,20}}?{date_pattern}",
         compact,
     )
@@ -594,7 +645,8 @@ def _announcement_share_codes(
 
     match = re.search(
         r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|"
-        r"下属基金交易代码|涉及基金份额类别的交易代码)"
+        r"下属基金交易代码|涉及基金份额类别的交易代码|"
+        r"各基金份额类别(?:的)?交易代码)"
         r"((?:\d{6})+)",
         compact,
     )
@@ -609,7 +661,8 @@ def _announcement_share_codes(
     ]
     if codes:
         flag_match = re.search(
-            r"(?:该分级基金是否|该基金份额是否|下属分级基金是否)"
+            r"(?:该分级基金是否|该基金份额是否|该基金份额类别是否|"
+            r"各基金份额类别是否|下属分级基金是否)"
             r"[^是]{0,160}([是否-]+)(?:2、|2\.|其他|金额单位|下属)",
             compact,
         )
@@ -632,6 +685,24 @@ def _announcement_share_codes(
     return [code for code, share in shares.items() if share_is_in_scope(share)]
 
 
+_LIMIT_UNIT_PATTERN = (
+    r"(?:元人民币|人民币(?:亿元|万元|元)?|(?:亿|万)?美元|亿元|万元|元)"
+)
+
+
+def _limit_currency(unit: str) -> str:
+    return "美元" if "美元" in unit else "人民币"
+
+
+def _limit_amount(raw_amount: str, unit: str) -> Decimal:
+    amount = Decimal(raw_amount.replace(",", ""))
+    if "亿" in unit:
+        return amount * Decimal("100000000")
+    if "万" in unit:
+        return amount * Decimal("10000")
+    return amount
+
+
 def _announcement_limits(
     text: str,
     compact: str,
@@ -640,7 +711,8 @@ def _announcement_limits(
     limits: dict[str, Decimal] = {}
     code_match = re.search(
         r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|"
-        r"下属基金交易代码|涉及基金份额类别的交易代码)"
+        r"下属基金交易代码|涉及基金份额类别的交易代码|"
+        r"各基金份额类别(?:的)?交易代码)"
         r"((?:\d{6})+)",
         compact,
     )
@@ -662,17 +734,19 @@ def _announcement_limits(
         # wider scan can mistake the next table's six-digit fund codes for
         # per-share amounts.
         header_end: int | None = None
+        header_unit: str | None = None
         header_block = ""
         for candidate_end in range(index, min(index + 4, len(lines))):
             header_block = re.sub(
                 r"\s+", "", "".join(lines[index : candidate_end + 1])
             )
+            unit_match = re.search(
+                rf"单位[：:]?(?P<unit>{_LIMIT_UNIT_PATTERN})[）)]",
+                header_block,
+            )
             if (
                 "金额" in header_block
-                and re.search(
-                    r"单位[：:]?(?:人民币元|美元)[）)]",
-                    header_block,
-                )
+                and unit_match
                 and (
                     "申购" in header_block
                     or "购金额" in header_block
@@ -680,11 +754,12 @@ def _announcement_limits(
                 )
             ):
                 header_end = candidate_end
+                header_unit = unit_match.group("unit")
                 break
-        if header_end is None:
+        if header_end is None or header_unit is None:
             continue
         value_lines: list[str] = []
-        inline_value = lines[header_end].rsplit("）", 1)[-1]
+        inline_value = re.split(r"[）)]", lines[header_end])[-1]
         if inline_value.strip():
             value_lines.append(inline_value)
         if header_end + 1 < len(lines):
@@ -696,7 +771,7 @@ def _announcement_limits(
             if len(values) != len(ordered_codes):
                 continue
             for code, raw_amount in zip(ordered_codes, values, strict=True):
-                limits[code] = Decimal(raw_amount.replace(",", ""))
+                limits[code] = _limit_amount(raw_amount, header_unit)
             break
         if limits:
             break
@@ -707,14 +782,14 @@ def _announcement_limits(
     )
     if table_match:
         table_values = re.findall(
-            r"(\d[\d,]*(?:\.\d+)?)(美元|元)",
+            rf"(\d[\d,]*(?:\.\d+)?)({_LIMIT_UNIT_PATTERN})",
             table_match.group(1),
         )
         if len(table_values) == len(ordered_codes):
-            for code, (raw_amount, _) in zip(
+            for code, (raw_amount, unit) in zip(
                 ordered_codes, table_values, strict=True
             ):
-                limits[code] = Decimal(raw_amount.replace(",", ""))
+                limits[code] = _limit_amount(raw_amount, unit)
         else:
             # PDF tables often lose their column boundaries during text
             # extraction, for example ``10.0010.0010.00``.  Two-decimal
@@ -735,32 +810,35 @@ def _announcement_limits(
     common_limit = re.search(
         r"(?<!下属分级基金的)(?<!下属基金份额的)"
         r"限制申购(?:（[^）]*）)?金额"
-        r"（单位：(?P<unit>人民币元|美元)）"
+        rf"[（(]单位[：:]?(?P<unit>{_LIMIT_UNIT_PATTERN})[）)]"
         r"(?P<amount>\d[\d,]*(?:\.\d+)?)",
         compact,
     )
     if common_limit:
-        currency = "美元" if common_limit.group("unit") == "美元" else "人民币"
-        amount = Decimal(common_limit.group("amount").replace(",", ""))
+        currency = _limit_currency(common_limit.group("unit"))
+        amount = _limit_amount(
+            common_limit.group("amount"), common_limit.group("unit")
+        )
         currency_shares = [
             share for share in shares.values() if share.currency == currency
         ]
         # A whitespace-free PDF table can look like one common amount even
-        # though it contains one value per share. Use this fallback only for
-        # a single in-scope share.
-        if len(currency_shares) == 1:
-            limits.setdefault(currency_shares[0].code, amount)
+        # though it contains one value per share. Do not spread it when an
+        # explicit multi-share code table is present.
+        if len(currency_shares) == 1 or not ordered_codes:
+            for share in currency_shares:
+                limits.setdefault(share.code, amount)
 
     for match in re.finditer(
         r"(?P<label>(?:本基金)?(?:[A-Z]类[、，及和]?)+基金份额)"
         r".{0,40}?(?:限制金额|限额)(?:为)?"
         r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
-        r"(?P<unit>美元|元)",
+        rf"(?P<unit>{_LIMIT_UNIT_PATTERN})",
         compact,
     ):
         classes = set(re.findall(r"([A-Z])类", match.group("label")))
-        currency = "美元" if match.group("unit") == "美元" else "人民币"
-        amount = Decimal(match.group("amount").replace(",", ""))
+        currency = _limit_currency(match.group("unit"))
+        amount = _limit_amount(match.group("amount"), match.group("unit"))
         for share in shares.values():
             if share.currency == currency and share.share_class in classes:
                 limits[share.code] = amount
@@ -768,26 +846,49 @@ def _announcement_limits(
     scoped_limit = re.search(
         r"(?:该基金份额的限制金额|调整后限额)(?:为)?"
         r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
-        r"(?P<unit>美元|元)",
+        rf"(?P<unit>{_LIMIT_UNIT_PATTERN})",
         compact,
     )
     if scoped_limit:
-        currency = "美元" if scoped_limit.group("unit") == "美元" else "人民币"
-        amount = Decimal(scoped_limit.group("amount").replace(",", ""))
+        currency = _limit_currency(scoped_limit.group("unit"))
+        amount = _limit_amount(
+            scoped_limit.group("amount"), scoped_limit.group("unit")
+        )
         for share in shares.values():
             if share.currency == currency:
                 limits.setdefault(share.code, amount)
 
     cumulative_limit = re.search(
         r"(?:单日)?累计(?:申购及定期定额投资)?金额"
-        r"(?:应不超过|不超过|不高于|超过|为)?"
+        r"(?:应不超过|不应超过|不超过|不高于|超过|为)?"
         r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
-        r"(?P<unit>美元|元)(?:以下)?",
+        rf"(?P<unit>{_LIMIT_UNIT_PATTERN})(?:以下)?",
         compact,
     )
     if cumulative_limit and len(shares) == 1:
-        currency = "美元" if cumulative_limit.group("unit") == "美元" else "人民币"
-        amount = Decimal(cumulative_limit.group("amount").replace(",", ""))
+        currency = _limit_currency(cumulative_limit.group("unit"))
+        amount = _limit_amount(
+            cumulative_limit.group("amount"), cumulative_limit.group("unit")
+        )
+        for share in shares.values():
+            if share.currency == currency:
+                limits.setdefault(share.code, amount)
+
+    per_share_account_limit = re.search(
+        r"单个基金账户单日累计申购"
+        r"(?:（含定期定额投资）)?"
+        r"单个基金份额的金额"
+        r"(?:不得超过|不超过|不高于)"
+        r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
+        rf"(?P<unit>{_LIMIT_UNIT_PATTERN})",
+        compact,
+    )
+    if per_share_account_limit:
+        currency = _limit_currency(per_share_account_limit.group("unit"))
+        amount = _limit_amount(
+            per_share_account_limit.group("amount"),
+            per_share_account_limit.group("unit"),
+        )
         for share in shares.values():
             if share.currency == currency:
                 limits.setdefault(share.code, amount)
@@ -801,13 +902,15 @@ def _announcement_limits(
         r".{0,260}?"
         r"(?:业务限额为|累计限额为|累计金额应不超过|累计高于)"
         r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
-        r"(?P<unit>元人民币|人民币|美元|元)",
+        rf"(?P<unit>{_LIMIT_UNIT_PATTERN})",
         compact,
     ):
         label = normalize_name(match.group("label"))
         share_classes = set(re.findall(r"([A-Z])类", label))
-        currency = "美元" if "美元" in label or match.group("unit") == "美元" else "人民币"
-        amount = Decimal(match.group("amount").replace(",", ""))
+        currency = (
+            "美元" if "美元" in label else _limit_currency(match.group("unit"))
+        )
+        amount = _limit_amount(match.group("amount"), match.group("unit"))
         candidates = [
             share
             for share in shares.values()
@@ -842,7 +945,13 @@ def parse_subscription_announcement(
     adjusts_subscription_limit = bool(
         re.search(r"调整.*?申购.*?(?:上限|限额)", normalized_title)
     )
-    if cancels_limit or "恢复大额申购" in normalized_title:
+    resumes_large_subscription = bool(
+        re.search(r"恢复(?:[（(]大额[）)]|大额).*?申购", normalized_title)
+    )
+    opens_subscription = bool(
+        re.search(r"开放(?:日常)?(?:办理)?申购", normalized_title)
+    )
+    if cancels_limit or resumes_large_subscription:
         status = "open"
     elif pauses_subscription and not pauses_large_subscription:
         status = "suspended"
@@ -860,7 +969,7 @@ def parse_subscription_announcement(
         )
     ):
         status = "limited"
-    elif "开放申购" in normalized_title or (
+    elif opens_subscription or (
         "恢复申购" in normalized_title and "暂停申购" not in normalized_title
     ):
         status = "open"
@@ -1004,6 +1113,19 @@ def discover_subscription_shares(
     return discovered
 
 
+def current_announcement_shares(
+    announcement_shares: dict[str, tuple[SummaryShare, str]],
+    current_codes: set[str],
+) -> dict[str, tuple[SummaryShare, str]]:
+    """Use historical announcements only to enrich currently evidenced shares."""
+
+    return {
+        code: source
+        for code, source in announcement_shares.items()
+        if code in current_codes
+    }
+
+
 def merge_summary_share(
     shares: dict[str, tuple[SummaryShare, str]],
     share: SummaryShare,
@@ -1063,6 +1185,11 @@ def resolve_subscription_states(
             warnings.append(f"{document.title}: {exc}")
 
     return states, warnings
+
+
+def subscription_as_of_date(collected_at: datetime) -> date:
+    """Use the collection date for announcements, independent of lagging NAVs."""
+    return collected_at.astimezone(ASIA_SHANGHAI).date()
 
 
 def sync_subscription_state(
@@ -1400,6 +1527,67 @@ def share_nav_lookback_days(
         .limit(1)
     )
     return 400 if earliest is None or earliest > end_date - timedelta(days=370) else 45
+
+
+def recent_nav_share_codes(
+    session: Session,
+    product_id: int,
+    end_date: date,
+    *,
+    max_age_days: int = 45,
+) -> set[str]:
+    return set(
+        session.scalars(
+            select(FundShareClass.code)
+            .join(NavDaily, NavDaily.fund_share_class_id == FundShareClass.id)
+            .where(
+                FundShareClass.fund_product_id == product_id,
+                NavDaily.nav_date >= end_date - timedelta(days=max_age_days),
+            )
+            .distinct()
+        )
+    )
+
+
+def current_product_share_codes(
+    candidate_code: str,
+    summary_shares: dict[str, tuple[SummaryShare, str]],
+    recent_nav_codes: set[str],
+) -> set[str]:
+    return {candidate_code, *summary_shares, *recent_nav_codes}
+
+
+def retire_stale_product_shares(
+    session: Session,
+    product_id: int,
+    current_codes: set[str],
+    collected_at: datetime,
+) -> int:
+    stale_share_ids = list(
+        session.scalars(
+            select(FundShareClass.id).where(
+                FundShareClass.fund_product_id == product_id,
+                FundShareClass.status == "active",
+                FundShareClass.code.not_in(sorted(current_codes)),
+            )
+        )
+    )
+    if not stale_share_ids:
+        return 0
+    session.execute(
+        update(SalesLimitHistory)
+        .where(
+            SalesLimitHistory.fund_share_class_id.in_(stale_share_ids),
+            SalesLimitHistory.effective_to.is_(None),
+        )
+        .values(effective_to=collected_at)
+    )
+    session.execute(
+        update(FundShareClass)
+        .where(FundShareClass.id.in_(stale_share_ids))
+        .values(status="inactive", updated_at=collected_at)
+    )
+    return len(stale_share_ids)
 
 
 def sync_fund(
@@ -1775,12 +1963,26 @@ def run_sync(
                         )
 
                         exchange_traded: bool | None = None
+                        summary_discovery_complete = True
                         summaries: list[
                             tuple[DisclosureDocument, ProductSummary]
                         ] = []
-                        for document in disclosure_documents(
-                            detail_html, PRODUCT_SUMMARY_LABEL
-                        ):
+                        try:
+                            summary_documents = product_summary_documents(
+                                client,
+                                detail_html,
+                                candidate.code,
+                                collected_at.date(),
+                            )
+                        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                            summary_discovery_complete = False
+                            warnings.append(
+                                f"{candidate.code}: advanced summary search: {exc}"
+                            )
+                            summary_documents = disclosure_documents(
+                                detail_html, PRODUCT_SUMMARY_LABEL
+                            )
+                        for document in summary_documents:
                             try:
                                 summary_text = fetch_disclosure_text(
                                     client, document
@@ -1800,12 +2002,14 @@ def run_sync(
                                 RuntimeError,
                                 ValueError,
                             ) as exc:
+                                summary_discovery_complete = False
                                 warnings.append(
                                     f"{candidate.code} {document.title}: {exc}"
                                 )
                         if exchange_traded:
                             continue
                         if not summaries:
+                            summary_discovery_complete = False
                             warnings.append(
                                 f"{candidate.code} {candidate.name}: "
                                 "no usable product summary"
@@ -1880,6 +2084,20 @@ def run_sync(
                             candidate.code: primary_share_id,
                             **discovered_share_ids,
                         }
+                        if summary_discovery_complete:
+                            current_codes = current_product_share_codes(
+                                candidate.code,
+                                summary_shares,
+                                recent_nav_share_codes(
+                                    session, product_id, snapshot_date
+                                ),
+                            )
+                            retire_stale_product_shares(
+                                session,
+                                product_id,
+                                current_codes,
+                                collected_at,
+                            )
 
                         rates_by_code: dict[
                             str, tuple[dict[str, Decimal], str]
@@ -2014,6 +2232,7 @@ def run_details_sync(
             snapshot_date, time.min, tzinfo=ASIA_SHANGHAI
         )
         collected_at = datetime.now(UTC)
+        subscription_date = subscription_as_of_date(collected_at)
         products = shares = nav_rows = fee_shares = scales = subscription_states = 0
         return_metrics = 0
         failures: list[str] = []
@@ -2184,9 +2403,6 @@ def run_details_sync(
                                 by_identity.values(),
                                 key=lambda item: (item.code, item.nav_date),
                             )
-                        summary_shares: dict[
-                            str, tuple[SummaryShare, str]
-                        ] = {}
                         announcements, announcement_warnings = (
                             fetch_subscription_announcements(
                                 client, detail_html
@@ -2196,22 +2412,15 @@ def run_details_sync(
                             f"{candidate.code} {warning}"
                             for warning in announcement_warnings
                         )
-                        for code, discovered_share in (
-                            discover_subscription_shares(
-                                announcements,
-                                detail.short_name or candidate.name,
-                            ).items()
-                        ):
-                            merge_summary_share(
-                                summary_shares,
-                                discovered_share[0],
-                                discovered_share[1],
-                            )
+                        announcement_shares = discover_subscription_shares(
+                            announcements,
+                            detail.short_name or candidate.name,
+                        )
                         fallback_shares = {
                             **stored_shares_by_product.get(stored_product.id, {}),
                             **{
                                 code: source[0]
-                                for code, source in summary_shares.items()
+                                for code, source in announcement_shares.items()
                             },
                         }
                         official_records: list[NavRecord] = []
@@ -2291,6 +2500,24 @@ def run_details_sync(
                             raise RuntimeError(
                                 "no valid NAV rows from EID or official company sources"
                             )
+                        current_codes = {
+                            candidate.code,
+                            *(record.code for record in records),
+                            *recent_nav_share_codes(
+                                session, stored_product.id, max_nav_date
+                            ),
+                        }
+                        summary_shares: dict[
+                            str, tuple[SummaryShare, str]
+                        ] = {}
+                        for discovered_share in current_announcement_shares(
+                            announcement_shares, current_codes
+                        ).values():
+                            merge_summary_share(
+                                summary_shares,
+                                discovered_share[0],
+                                discovered_share[1],
+                            )
                         _, share_ids, synced_nav = sync_fund(
                             session,
                             candidate,
@@ -2338,7 +2565,7 @@ def run_details_sync(
                         states, state_warnings = resolve_subscription_states(
                             announcements,
                             stored_shares,
-                            snapshot_date,
+                            subscription_date,
                             detail_url,
                         )
                         warnings.extend(
