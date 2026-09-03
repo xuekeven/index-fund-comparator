@@ -445,6 +445,7 @@ export function KnowledgeBase() {
                       }
                     }}
                   >
+                    <h2>{category}</h2>
                     <button
                       className="knowledge-drag-handle"
                       type="button"
@@ -457,7 +458,6 @@ export function KnowledgeBase() {
                     >
                       <span aria-hidden="true">⠿</span>
                     </button>
-                    <h2>{category}</h2>
                   </div>
                   {items.map((article) => (
                     <div
@@ -486,6 +486,13 @@ export function KnowledgeBase() {
                       }}
                     >
                       <button
+                        className="knowledge-article-select"
+                        type="button"
+                        onClick={() => setActiveId(article.id)}
+                      >
+                        <strong>{article.title}</strong>
+                      </button>
+                      <button
                         className="knowledge-drag-handle"
                         type="button"
                         draggable={canReorder}
@@ -499,13 +506,6 @@ export function KnowledgeBase() {
                         onDragEnd={finishDrag}
                       >
                         <span aria-hidden="true">⠿</span>
-                      </button>
-                      <button
-                        className="knowledge-article-select"
-                        type="button"
-                        onClick={() => setActiveId(article.id)}
-                      >
-                        <strong>{article.title}</strong>
                       </button>
                     </div>
                   ))}

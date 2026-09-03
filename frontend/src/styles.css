@@ -812,8 +812,9 @@ a { color: inherit; text-decoration: none; }
 .knowledge-catalog section + section { margin-top: 21px; }
 .knowledge-catalog section { position: relative; }
 .knowledge-category-header { min-height: 28px; margin-bottom: 8px; display: flex; align-items: center; border-radius: 8px; }
-.knowledge-category-header h2 { min-width: 0; margin: 0 9px; color: var(--ink); font-size: 13px; letter-spacing: .12em; }
+.knowledge-category-header h2 { min-width: 0; margin: 0 9px; flex: 1; color: var(--ink); font-size: 13px; letter-spacing: .12em; }
 .knowledge-drag-handle { width: 20px; height: 28px; padding: 0; flex: 0 0 20px; border: 0; border-radius: 6px; color: #87958e; background: transparent; font-size: 15px; line-height: 1; opacity: 0; cursor: grab; transition: opacity .15s, color .15s, background .15s; }
+.knowledge-category-header .knowledge-drag-handle { margin-right: 8px; }
 .knowledge-drag-handle:hover, .knowledge-drag-handle:focus-visible { color: var(--green-dark); background: #e8f1eb; opacity: 1; outline: 0; }
 .knowledge-drag-handle:active { cursor: grabbing; }
 .knowledge-category-header:hover > .knowledge-drag-handle,
@@ -822,7 +823,7 @@ a { color: inherit; text-decoration: none; }
 .knowledge-article-row + .knowledge-article-row { margin-top: 3px; }
 .knowledge-article-row:hover { background: #eef3f0; }
 .knowledge-article-row.active { background: white; box-shadow: 0 5px 18px rgba(28,52,42,.08); }
-.knowledge-article-select { min-width: 0; height: 100%; padding: 6px 10px 6px 0; flex: 1; border: 0; color: var(--ink); background: transparent; text-align: left; cursor: pointer; }
+.knowledge-article-select { min-width: 0; height: 100%; padding: 6px 10px 6px 18px; flex: 1; border: 0; color: var(--ink); background: transparent; text-align: left; cursor: pointer; }
 .knowledge-article-select strong { display: block; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-catalog section.drop-before::before, .knowledge-catalog section.drop-after::after,
 .knowledge-article-row.drop-before::before, .knowledge-article-row.drop-after::after { content: ""; height: 2px; position: absolute; right: 4px; left: 4px; z-index: 2; border-radius: 2px; background: var(--green); }
