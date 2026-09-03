@@ -18,6 +18,10 @@ from app.models import (
     InvestmentNoteCreate,
     InvestmentNoteItem,
     InvestmentNoteUpdate,
+    KnowledgeArticleCreate,
+    KnowledgeArticleItem,
+    KnowledgeReorderRequest,
+    KnowledgeArticleUpdate,
     NavSeriesResponse,
 )
 from app.repository import FundRepository, get_repository
@@ -236,6 +240,69 @@ def delete_investment_note(
 ) -> dict[str, bool]:
     if not repository.delete_note(note_id):
         raise HTTPException(status_code=404, detail="Investment note not found")
+    return {"deleted": True}
+
+
+@app.get(
+    f"{settings.api_prefix}/knowledge",
+    response_model=list[KnowledgeArticleItem],
+)
+def list_knowledge_articles(
+    repository: RepositoryDep,
+    q: str | None = None,
+    category: str | None = None,
+) -> list[KnowledgeArticleItem]:
+    return repository.list_knowledge_articles(query=q, category=category)
+
+
+@app.post(
+    f"{settings.api_prefix}/knowledge",
+    response_model=KnowledgeArticleItem,
+    status_code=201,
+)
+def create_knowledge_article(
+    payload: KnowledgeArticleCreate,
+    repository: RepositoryDep,
+) -> KnowledgeArticleItem:
+    return repository.create_knowledge_article(payload)
+
+
+@app.put(
+    f"{settings.api_prefix}/knowledge/order",
+    response_model=list[KnowledgeArticleItem],
+)
+def reorder_knowledge_articles(
+    payload: KnowledgeReorderRequest,
+    repository: RepositoryDep,
+) -> list[KnowledgeArticleItem]:
+    try:
+        return repository.reorder_knowledge_articles(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{settings.api_prefix}/knowledge/{{article_id}}",
+    response_model=KnowledgeArticleItem,
+)
+def update_knowledge_article(
+    article_id: int,
+    payload: KnowledgeArticleUpdate,
+    repository: RepositoryDep,
+) -> KnowledgeArticleItem:
+    article = repository.update_knowledge_article(article_id, payload)
+    if article is None:
+        raise HTTPException(status_code=404, detail="Knowledge article not found")
+    return article
+
+
+@app.delete(f"{settings.api_prefix}/knowledge/{{article_id}}")
+def delete_knowledge_article(
+    article_id: int,
+    repository: RepositoryDep,
+) -> dict[str, bool]:
+    if not repository.delete_knowledge_article(article_id):
+        raise HTTPException(status_code=404, detail="Knowledge article not found")
     return {"deleted": True}
 
 

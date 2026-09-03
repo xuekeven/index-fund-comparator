@@ -17,6 +17,7 @@ CORE_TABLES = {
     "calculated_metric",
     "user_fund_tag",
     "investment_note",
+    "knowledge_article",
 }
 
 
@@ -92,3 +93,16 @@ def test_investment_notes_are_single_user_and_structured() -> None:
     assert "加仓" in str(action_constraint.sqltext)
     assert "index_ids" in note_table.columns
     assert "fund_codes" in note_table.columns
+
+
+def test_knowledge_articles_store_stable_reference_fields() -> None:
+    article_table = Base.metadata.tables["knowledge_article"]
+
+    assert "user_id" in article_table.columns
+    assert "content_markdown" in article_table.columns
+    assert "sources" in article_table.columns
+    assert "reviewed_at" in article_table.columns
+    assert "status" not in article_table.columns
+    assert "category_order" in article_table.columns
+    assert "article_order" in article_table.columns
+    assert "ix_knowledge_article_user_order" in {index.name for index in article_table.indexes}

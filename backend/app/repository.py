@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import Select, and_, case, delete, func, literal, or_, select, union_all
+from sqlalchemy import Select, String, and_, case, cast, delete, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session, aliased
 
 from app.config import get_settings
@@ -19,6 +19,7 @@ from app.database_models import (
     IndexDefinition,
     IndexFamily,
     InvestmentNote,
+    KnowledgeArticle,
     MarketQuote,
     NavDaily,
     SalesLimitHistory,
@@ -34,6 +35,10 @@ from app.models import (
     InvestmentNoteCreate,
     InvestmentNoteItem,
     InvestmentNoteUpdate,
+    KnowledgeArticleCreate,
+    KnowledgeArticleItem,
+    KnowledgeReorderRequest,
+    KnowledgeArticleUpdate,
     MetricValue,
     NavPoint,
 )
@@ -94,6 +99,59 @@ def _note_item(note: InvestmentNote) -> InvestmentNoteItem:
         fund_codes=list(note.fund_codes or []),
         created_at=note.created_at,
         updated_at=note.updated_at,
+    )
+
+
+def _normalized_knowledge_values(
+    payload: KnowledgeArticleCreate | KnowledgeArticleUpdate,
+) -> dict[str, Any]:
+    values = payload.model_dump()
+    for field in ("title", "category", "summary", "content_markdown"):
+        values[field] = values[field].strip()
+    values["tags"] = list(
+        dict.fromkeys(value.strip() for value in payload.tags if value.strip())
+    )
+    values["sources"] = [
+        {"name": source.name.strip(), "url": source.url.strip() if source.url else None}
+        for source in payload.sources
+    ]
+    return values
+
+
+def _knowledge_reorder_values(
+    payload: KnowledgeReorderRequest,
+    existing_ids: set[int],
+) -> dict[int, tuple[str, int, int]]:
+    values: dict[int, tuple[str, int, int]] = {}
+    seen_categories: set[str] = set()
+    for category_order, group in enumerate(payload.categories):
+        category = group.category.strip()
+        if category in seen_categories:
+            raise ValueError(f"Duplicate knowledge category: {category}")
+        seen_categories.add(category)
+        for article_order, article_id in enumerate(group.article_ids):
+            if article_id in values:
+                raise ValueError(f"Duplicate knowledge article: {article_id}")
+            values[article_id] = (category, category_order, article_order)
+    if set(values) != existing_ids:
+        raise ValueError("Knowledge reorder payload must contain every article exactly once")
+    return values
+
+
+def _knowledge_item(article: KnowledgeArticle) -> KnowledgeArticleItem:
+    return KnowledgeArticleItem(
+        id=article.id,
+        title=article.title,
+        category=article.category,
+        summary=article.summary,
+        content_markdown=article.content_markdown,
+        tags=list(article.tags or []),
+        sources=list(article.sources or []),
+        reviewed_at=article.reviewed_at,
+        category_order=article.category_order,
+        article_order=article.article_order,
+        created_at=article.created_at,
+        updated_at=article.updated_at,
     )
 
 
@@ -192,6 +250,31 @@ class FundRepository(ABC):
     def delete_note(self, note_id: int) -> bool: ...
 
     @abstractmethod
+    def list_knowledge_articles(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+    ) -> list[KnowledgeArticleItem]: ...
+
+    @abstractmethod
+    def create_knowledge_article(
+        self, payload: KnowledgeArticleCreate
+    ) -> KnowledgeArticleItem: ...
+
+    @abstractmethod
+    def update_knowledge_article(
+        self, article_id: int, payload: KnowledgeArticleUpdate
+    ) -> KnowledgeArticleItem | None: ...
+
+    @abstractmethod
+    def delete_knowledge_article(self, article_id: int) -> bool: ...
+
+    @abstractmethod
+    def reorder_knowledge_articles(
+        self, payload: KnowledgeReorderRequest
+    ) -> list[KnowledgeArticleItem]: ...
+
+    @abstractmethod
     def get_nav(
         self,
         code: str,
@@ -237,6 +320,8 @@ class SampleFundRepository(FundRepository):
             )
         ]
         self._next_note_id = 2
+        self._knowledge_articles: list[KnowledgeArticleItem] = []
+        self._next_knowledge_article_id = 1
 
     def list_indices(self) -> list[IndexSummary]:
         return self._indices
@@ -348,6 +433,141 @@ class SampleFundRepository(FundRepository):
         original_count = len(self._notes)
         self._notes = [note for note in self._notes if note.id != note_id]
         return len(self._notes) != original_count
+
+    def list_knowledge_articles(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+    ) -> list[KnowledgeArticleItem]:
+        normalized_query = query.strip().casefold() if query else None
+        articles = [
+            article
+            for article in self._knowledge_articles
+            if (category is None or article.category == category)
+            and (
+                normalized_query is None
+                or normalized_query
+                in " ".join(
+                    (
+                        article.title,
+                        article.category,
+                        article.summary,
+                        article.content_markdown,
+                        " ".join(article.tags),
+                        " ".join(
+                            value
+                            for source in article.sources
+                            for value in (source.name, source.url or "")
+                        ),
+                    )
+                ).casefold()
+            )
+        ]
+        return sorted(
+            articles,
+            key=lambda article: (
+                article.category_order,
+                article.article_order,
+                article.id,
+            ),
+        )
+
+    def create_knowledge_article(
+        self, payload: KnowledgeArticleCreate
+    ) -> KnowledgeArticleItem:
+        category = payload.category.strip()
+        category_orders = [
+            article.category_order
+            for article in self._knowledge_articles
+            if article.category == category
+        ]
+        category_order = (
+            min(category_orders)
+            if category_orders
+            else max(
+                (article.category_order for article in self._knowledge_articles),
+                default=-1,
+            ) + 1
+        )
+        article_order = max(
+            (
+                article.article_order for article in self._knowledge_articles
+                if article.category == category
+            ),
+            default=-1,
+        ) + 1
+        now = datetime.now(UTC)
+        article = KnowledgeArticleItem(
+            id=self._next_knowledge_article_id,
+            **_normalized_knowledge_values(payload),
+            category_order=category_order,
+            article_order=article_order,
+            created_at=now,
+            updated_at=now,
+        )
+        self._next_knowledge_article_id += 1
+        self._knowledge_articles.append(article)
+        return article
+
+    def update_knowledge_article(
+        self, article_id: int, payload: KnowledgeArticleUpdate
+    ) -> KnowledgeArticleItem | None:
+        for index, article in enumerate(self._knowledge_articles):
+            if article.id != article_id:
+                continue
+            values = _normalized_knowledge_values(payload)
+            if values["category"] != article.category:
+                category_matches = [
+                    item for item in self._knowledge_articles
+                    if item.category == values["category"]
+                ]
+                values["category_order"] = min(
+                    (item.category_order for item in category_matches),
+                    default=max(
+                        (item.category_order for item in self._knowledge_articles),
+                        default=-1,
+                    ) + 1,
+                )
+                values["article_order"] = max(
+                    (item.article_order for item in category_matches), default=-1
+                ) + 1
+            updated = KnowledgeArticleItem.model_validate(
+                {
+                    **article.model_dump(),
+                    **values,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            self._knowledge_articles[index] = updated
+            return updated
+        return None
+
+    def delete_knowledge_article(self, article_id: int) -> bool:
+        original_count = len(self._knowledge_articles)
+        self._knowledge_articles = [
+            article for article in self._knowledge_articles if article.id != article_id
+        ]
+        return len(self._knowledge_articles) != original_count
+
+    def reorder_knowledge_articles(
+        self, payload: KnowledgeReorderRequest
+    ) -> list[KnowledgeArticleItem]:
+        values = _knowledge_reorder_values(
+            payload, {article.id for article in self._knowledge_articles}
+        )
+        now = datetime.now(UTC)
+        self._knowledge_articles = [
+            article.model_copy(
+                update={
+                    "category": values[article.id][0],
+                    "category_order": values[article.id][1],
+                    "article_order": values[article.id][2],
+                    "updated_at": now,
+                }
+            )
+            for article in self._knowledge_articles
+        ]
+        return self.list_knowledge_articles()
 
     def get_nav(
         self,
@@ -732,6 +952,163 @@ class PostgresFundRepository(FundRepository):
             session.delete(note)
             session.commit()
             return True
+
+    def list_knowledge_articles(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+    ) -> list[KnowledgeArticleItem]:
+        with self._session_factory() as session:
+            statement = select(KnowledgeArticle).where(
+                KnowledgeArticle.user_id == SINGLE_USER_ID
+            )
+            if category is not None:
+                statement = statement.where(KnowledgeArticle.category == category)
+            if query and query.strip():
+                pattern = f"%{query.strip()}%"
+                statement = statement.where(
+                    or_(
+                        KnowledgeArticle.title.ilike(pattern),
+                        KnowledgeArticle.category.ilike(pattern),
+                        KnowledgeArticle.summary.ilike(pattern),
+                        KnowledgeArticle.content_markdown.ilike(pattern),
+                        cast(KnowledgeArticle.tags, String).ilike(pattern),
+                        cast(KnowledgeArticle.sources, String).ilike(pattern),
+                    )
+                )
+            articles = session.scalars(
+                statement.order_by(
+                    KnowledgeArticle.category_order.asc(),
+                    KnowledgeArticle.article_order.asc(),
+                    KnowledgeArticle.id.asc(),
+                )
+            ).all()
+            return [_knowledge_item(article) for article in articles]
+
+    def create_knowledge_article(
+        self, payload: KnowledgeArticleCreate
+    ) -> KnowledgeArticleItem:
+        with self._session_factory() as session:
+            category = payload.category.strip()
+            category_order = session.scalar(
+                select(func.min(KnowledgeArticle.category_order)).where(
+                    KnowledgeArticle.user_id == SINGLE_USER_ID,
+                    KnowledgeArticle.category == category,
+                )
+            )
+            if category_order is None:
+                maximum_category_order = session.scalar(
+                    select(func.max(KnowledgeArticle.category_order)).where(
+                        KnowledgeArticle.user_id == SINGLE_USER_ID
+                    )
+                )
+                category_order = (maximum_category_order if maximum_category_order is not None else -1) + 1
+            maximum_article_order = session.scalar(
+                select(func.max(KnowledgeArticle.article_order)).where(
+                    KnowledgeArticle.user_id == SINGLE_USER_ID,
+                    KnowledgeArticle.category == category,
+                )
+            )
+            article = KnowledgeArticle(
+                user_id=SINGLE_USER_ID,
+                category_order=category_order,
+                article_order=(maximum_article_order if maximum_article_order is not None else -1) + 1,
+                **_normalized_knowledge_values(payload),
+            )
+            session.add(article)
+            session.commit()
+            session.refresh(article)
+            return _knowledge_item(article)
+
+    def update_knowledge_article(
+        self, article_id: int, payload: KnowledgeArticleUpdate
+    ) -> KnowledgeArticleItem | None:
+        with self._session_factory() as session:
+            article = session.scalar(
+                select(KnowledgeArticle).where(
+                    KnowledgeArticle.id == article_id,
+                    KnowledgeArticle.user_id == SINGLE_USER_ID,
+                )
+            )
+            if article is None:
+                return None
+            values = _normalized_knowledge_values(payload)
+            if values["category"] != article.category:
+                category_order = session.scalar(
+                    select(func.min(KnowledgeArticle.category_order)).where(
+                        KnowledgeArticle.user_id == SINGLE_USER_ID,
+                        KnowledgeArticle.category == values["category"],
+                    )
+                )
+                if category_order is None:
+                    maximum_category_order = session.scalar(
+                        select(func.max(KnowledgeArticle.category_order)).where(
+                            KnowledgeArticle.user_id == SINGLE_USER_ID
+                        )
+                    )
+                    category_order = (
+                        maximum_category_order if maximum_category_order is not None else -1
+                    ) + 1
+                maximum_article_order = session.scalar(
+                    select(func.max(KnowledgeArticle.article_order)).where(
+                        KnowledgeArticle.user_id == SINGLE_USER_ID,
+                        KnowledgeArticle.category == values["category"],
+                    )
+                )
+                article.category_order = category_order
+                article.article_order = (
+                    maximum_article_order if maximum_article_order is not None else -1
+                ) + 1
+            for field, value in values.items():
+                setattr(article, field, value)
+            article.updated_at = datetime.now(UTC)
+            session.commit()
+            session.refresh(article)
+            return _knowledge_item(article)
+
+    def delete_knowledge_article(self, article_id: int) -> bool:
+        with self._session_factory() as session:
+            article = session.scalar(
+                select(KnowledgeArticle).where(
+                    KnowledgeArticle.id == article_id,
+                    KnowledgeArticle.user_id == SINGLE_USER_ID,
+                )
+            )
+            if article is None:
+                return False
+            session.delete(article)
+            session.commit()
+            return True
+
+    def reorder_knowledge_articles(
+        self, payload: KnowledgeReorderRequest
+    ) -> list[KnowledgeArticleItem]:
+        with self._session_factory() as session:
+            articles = session.scalars(
+                select(KnowledgeArticle).where(
+                    KnowledgeArticle.user_id == SINGLE_USER_ID
+                )
+            ).all()
+            values = _knowledge_reorder_values(
+                payload, {article.id for article in articles}
+            )
+            now = datetime.now(UTC)
+            for article in articles:
+                category, category_order, article_order = values[article.id]
+                article.category = category
+                article.category_order = category_order
+                article.article_order = article_order
+                article.updated_at = now
+            session.commit()
+            ordered = sorted(
+                articles,
+                key=lambda article: (
+                    article.category_order,
+                    article.article_order,
+                    article.id,
+                ),
+            )
+            return [_knowledge_item(article) for article in ordered]
 
     def get_nav(
         self,

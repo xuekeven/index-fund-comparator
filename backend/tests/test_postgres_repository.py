@@ -18,7 +18,7 @@ from app.database_models import (
     NavDaily,
     SalesLimitHistory,
 )
-from app.models import FundTagType, InvestmentNoteCreate
+from app.models import FundTagType, InvestmentNoteCreate, KnowledgeArticleCreate
 from app.repository import PostgresFundRepository
 
 
@@ -232,3 +232,22 @@ def test_postgres_repository_persists_tags_and_notes(repository) -> None:
     )
     assert repository.list_notes(query="集成测试")[0].id == note.id
     assert repository.delete_note(note.id)
+
+
+def test_postgres_repository_persists_knowledge_articles(repository) -> None:
+    article = repository.create_knowledge_article(
+        KnowledgeArticleCreate(
+            title="长期债券",
+            category="债券",
+            summary="利率与长债价格通常反向变动。",
+            content_markdown="# 利率关系\n\n降息通常有利于长债价格。",
+            tags=["利率", "长债"],
+            sources=[{"name": "测试资料", "url": "https://example.com/bonds"}],
+            reviewed_at=date(2026, 8, 31),
+        )
+    )
+
+    listed = repository.list_knowledge_articles(query="降息", category="债券")
+    assert listed[0].id == article.id
+    assert listed[0].sources[0].name == "测试资料"
+    assert repository.delete_knowledge_article(article.id)

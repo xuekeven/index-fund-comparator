@@ -14,7 +14,7 @@ import type {
   InvestmentNoteCategory,
   InvestmentNotePayload,
 } from "@/lib/types";
-import { SearchIcon } from "./icons";
+import { CloseIcon, SearchIcon } from "./icons";
 
 const CATEGORY_OPTIONS: InvestmentNoteCategory[] = ["长期", "实时"];
 const SOURCE_OPTIONS = ["自我总结", "教主-群聊", "教主-微博", "猫笔刀-日报", "仓鼠投资-微博"] as const;
@@ -114,7 +114,7 @@ type NoteSelectProps = {
   onChange: (value: string) => void;
 };
 
-function NoteSelect({ id, label, value, options, open, onOpenChange, onChange }: NoteSelectProps) {
+export function NoteSelect({ id, label, value, options, open, onOpenChange, onChange }: NoteSelectProps) {
   const selectedLabel = options.find(([optionValue]) => optionValue === value)?.[1] ?? value;
   return (
     <div className={`multi-filter note-select ${open ? "open" : ""}`}>
@@ -140,9 +140,10 @@ type NoteDateFieldProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onChange: (value: string) => void;
+  required?: boolean;
 };
 
-function NoteDateField({ value, open, onOpenChange, onChange }: NoteDateFieldProps) {
+export function NoteDateField({ value, open, onOpenChange, onChange, required = true }: NoteDateFieldProps) {
   const [cursor, setCursor] = useState(() => /^\d{4}-\d{2}/.test(value) ? value.slice(0, 7) : today().slice(0, 7));
 
   const [cursorYear, cursorMonth] = cursor.split("-").map(Number);
@@ -162,7 +163,7 @@ function NoteDateField({ value, open, onOpenChange, onChange }: NoteDateFieldPro
 
   return (
     <div className={`note-date-control ${open ? "open" : ""}`}>
-      <input className="note-date-field" type="text" inputMode="numeric" required pattern="\d{4}-\d{2}-\d{2}" maxLength={10} value={value} onChange={(event) => onChange(event.target.value)} placeholder="YYYY-MM-DD" />
+      <input className="note-date-field" type="text" inputMode="numeric" required={required} pattern="\d{4}-\d{2}-\d{2}" maxLength={10} value={value} onChange={(event) => onChange(event.target.value)} placeholder="YYYY-MM-DD" />
       <button className="note-calendar-trigger" type="button" aria-label="选择日期" aria-expanded={open} onClick={() => {
         if (!open && /^\d{4}-\d{2}/.test(value)) setCursor(value.slice(0, 7));
         onOpenChange(!open);
@@ -540,12 +541,14 @@ export function InvestmentNotes() {
               <form className="note-editor" onSubmit={saveNote}>
                 <div className="note-editor-head">
                   <div><span className="section-kicker">{editing === "new" ? "创建记录" : "修改记录"}</span><h2 id="note-editor-title">{editing === "new" ? "新建投资笔记" : "编辑投资笔记"}</h2></div>
-                  <button type="button" disabled={saving} onClick={() => { setEditing(null); setOpenSelect(null); }}>取消</button>
+                  <button className="icon-button" type="button" disabled={saving} onClick={() => { setEditing(null); setOpenSelect(null); }} aria-label="关闭">
+                    <CloseIcon />
+                  </button>
                 </div>
                 {error && <p className="notes-error note-editor-error" role="alert">{error}</p>}
                 <div className="note-form-grid">
                   <div className="note-form-control"><span>日期</span><NoteDateField value={draft.noteDate} open={openSelect === "date"} onOpenChange={(open) => setOpenSelect(open ? "date" : null)} onChange={(value) => setDraft({ ...draft, noteDate: value })} /></div>
-                  <label><span>标题</span><input required maxLength={200} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：07-21 加减仓" /></label>
+                  <label><span>标题</span><input required maxLength={200} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
                   <div className="note-form-control"><span>类型</span><NoteSelect id="note-category" value={draft.category} options={CATEGORY_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "category"} onOpenChange={(open) => setOpenSelect(open ? "category" : null)} onChange={(value) => setDraft({ ...draft, category: value as InvestmentNoteCategory })} /></div>
                   <label><span>标签</span><input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="QDII、风控、估值" /></label>
                   <div className="note-form-control"><span>来源</span><NoteSelect id="note-source" value={draft.sourceName ?? ""} options={SOURCE_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "source"} onOpenChange={(open) => setOpenSelect(open ? "source" : null)} onChange={(value) => setDraft({ ...draft, sourceName: value, ownSummary: value === "自我总结" ? "" : draft.ownSummary })} /></div>

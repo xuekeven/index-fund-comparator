@@ -233,6 +233,85 @@ def test_investment_notes_validate_category_and_action() -> None:
     assert response.status_code == 422
 
 
+def test_knowledge_articles_round_trip() -> None:
+    created = client.post(
+        "/api/v1/knowledge",
+        json={
+            "title": "美国利率体系",
+            "category": "利率",
+            "summary": "理解 FFR、IOER 和 ON RRP 的关系。",
+            "contentMarkdown": "# 定义\n\n美联储通过利率工具影响流动性。",
+            "tags": ["利率", "美国"],
+            "sources": [{"name": "Federal Reserve", "url": "https://www.federalreserve.gov/"}],
+            "reviewedAt": "2026-08-31",
+        },
+    )
+    assert created.status_code == 201
+    article_id = created.json()["id"]
+    assert created.json()["sources"][0]["name"] == "Federal Reserve"
+
+    listed = client.get("/api/v1/knowledge", params={"q": "FFR", "category": "利率"})
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [article_id]
+
+    updated_payload = {**created.json(), "title": "美国利率体系（已复核）"}
+    updated = client.put(f"/api/v1/knowledge/{article_id}", json=updated_payload)
+    assert updated.status_code == 200
+    assert "status" not in updated.json()
+    assert updated.json()["categoryOrder"] == 0
+    assert updated.json()["articleOrder"] == 0
+
+    second = client.post(
+        "/api/v1/knowledge",
+        json={
+            "title": "短期债券",
+            "category": "资产配置",
+            "contentMarkdown": "短债用于流动性管理。",
+        },
+    ).json()
+    third = client.post(
+        "/api/v1/knowledge",
+        json={
+            "title": "黄金",
+            "category": "资产配置",
+            "contentMarkdown": "黄金用于信用风险对冲。",
+        },
+    ).json()
+
+    reordered = client.put(
+        "/api/v1/knowledge/order",
+        json={
+            "categories": [
+                {"category": "资产配置", "articleIds": [third["id"], second["id"]]},
+                {"category": "利率", "articleIds": [article_id]},
+            ]
+        },
+    )
+    assert reordered.status_code == 200
+    assert [item["id"] for item in reordered.json()] == [
+        third["id"], second["id"], article_id
+    ]
+
+    moved = client.put(
+        "/api/v1/knowledge/order",
+        json={
+            "categories": [{
+                "category": "资产配置",
+                "articleIds": [article_id, third["id"], second["id"]],
+            }]
+        },
+    )
+    assert moved.status_code == 200
+    assert moved.json()[0]["category"] == "资产配置"
+
+
+    assert client.delete(f"/api/v1/knowledge/{second['id']}").status_code == 200
+    assert client.delete(f"/api/v1/knowledge/{third['id']}").status_code == 200
+    deleted = client.delete(f"/api/v1/knowledge/{article_id}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+
+
 def test_filter_exchange_with_repeated_query_parameters() -> None:
     response = client.get(
         "/api/v1/indices/csi-500/funds",

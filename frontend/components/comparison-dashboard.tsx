@@ -31,6 +31,7 @@ import { ShareClassHelpDialog } from "./share-class-help-dialog";
 import { SyncInfoDialog } from "./sync-info-dialog";
 import { FUND_TAG_META } from "./fund-tag-meta";
 import { InvestmentNotes } from "./investment-notes";
+import { KnowledgeBase } from "./knowledge-base";
 import { TaggedFundsDialog } from "./tagged-funds-dialog";
 
 type CachedFunds = {
@@ -160,8 +161,12 @@ function SingleSelectFilter({
 
 export function ComparisonDashboard() {
   const [initialFilters] = useState(readFilterPreferences);
-  const [activePage, setActivePage] = useState<"funds" | "notes">(
-    () => window.location.hash === "#notes" ? "notes" : "funds",
+  const [activePage, setActivePage] = useState<"funds" | "notes" | "knowledge">(
+    () => window.location.hash === "#notes"
+      ? "notes"
+      : window.location.hash === "#knowledge"
+        ? "knowledge"
+        : "funds",
   );
   const [indices, setIndices] = useState<IndexSummary[]>([]);
   const [activeIndex, setActiveIndex] = useState(initialFilters.activeIndex);
@@ -593,7 +598,7 @@ export function ComparisonDashboard() {
                 setActivePage("funds");
               }}
             >
-              同类基金
+              指数基金
             </button>
             <button
               className={activePage === "notes" ? "active" : ""}
@@ -605,12 +610,24 @@ export function ComparisonDashboard() {
             >
               投资笔记
             </button>
+            <button
+              className={activePage === "knowledge" ? "active" : ""}
+              type="button"
+              onClick={() => {
+                window.location.hash = "knowledge";
+                setActivePage("knowledge");
+              }}
+            >
+              投资手册
+            </button>
           </nav>
         </div>
       </header>
 
       {activePage === "notes" ? (
         <InvestmentNotes />
+      ) : activePage === "knowledge" ? (
+        <KnowledgeBase />
       ) : (
         <>
       <main id="top">
@@ -618,7 +635,7 @@ export function ComparisonDashboard() {
           <div className="workspace-head">
             <div>
               <span className="section-kicker">选择基准</span>
-              <h2 id="workspace-title">比较同类基金</h2>
+              <h2 id="workspace-title">指数基金</h2>
             </div>
             <div className="workspace-actions">
               <nav className="tag-shortcuts" aria-label="我的基金标签">

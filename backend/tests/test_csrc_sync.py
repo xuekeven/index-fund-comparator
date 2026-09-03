@@ -857,6 +857,53 @@ def test_currency_scoped_announcement_does_not_override_usd_share() -> None:
     ]
 
 
+def test_annotated_share_code_row_includes_usd_share_in_suspension() -> None:
+    shares = {
+        share.code: share
+        for share in (
+            SummaryShare("018064", "华夏标普500ETF发起式联接A（人民币）", "A", "人民币", None),
+            SummaryShare("018065", "华夏标普500ETF发起式联接C（人民币）", "C", "人民币", None),
+            SummaryShare("018066", "华夏标普500ETF发起式联接A（美元现汇）", "A", "美元", "现汇"),
+        )
+    }
+
+    states = parse_subscription_announcement(
+        "华夏标普500ETF发起式联接（QDII）暂停申购及定期定额申购业务的公告",
+        "公告送出日期2025年11月22日，暂停申购起始日2025年11月24日，"
+        "各基金份额类别的交易代码018064（人民币）、018066（美元现汇）018065，"
+        "该基金份额类别是否暂停申购及定期定额申购业务是是，2、其他需要提示的事项",
+        shares,
+        "https://example.test/suspended.pdf",
+    )
+
+    assert [(state.code, state.status) for state in states] == [
+        ("018064", "suspended"),
+        ("018066", "suspended"),
+        ("018065", "suspended"),
+    ]
+
+
+def test_discover_subscription_share_uses_currency_annotation_after_code() -> None:
+    document = DisclosureDocument(
+        "暂停申购及定期定额申购业务的公告",
+        "https://example.test/suspended.pdf",
+    )
+    shares = discover_subscription_shares(
+        [(
+            document,
+            "各基金份额类别的简称华夏标普500ETF发起式联接（QDII）A"
+            "华夏标普500ETF发起式联接（QDII）C"
+            "各基金份额类别的交易代码018064（人民币）、"
+            "018066（美元现汇）018065该基金份额类别是否暂停申购是是",
+        )],
+        "华夏标普500ETF发起式联接（QDII）",
+    )
+
+    assert shares["018066"][0].currency == "美元"
+    assert shares["018066"][0].currency_form == "现汇"
+    assert "美元现汇" in shares["018066"][0].display_name
+
+
 def test_authoritative_subscription_sync_reopens_correct_older_state() -> None:
     correct_state = SimpleNamespace(
         id=1,

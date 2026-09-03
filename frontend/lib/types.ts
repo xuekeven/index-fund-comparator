@@ -115,3 +115,31 @@ export interface InvestmentNote extends InvestmentNotePayload {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface KnowledgeSource {
+  name: string;
+  url: string | null;
+}
+
+export interface KnowledgeArticlePayload {
+  title: string;
+  category: string;
+  summary: string;
+  contentMarkdown: string;
+  tags: string[];
+  sources: KnowledgeSource[];
+  reviewedAt: string | null;
+}
+
+export interface KnowledgeArticle extends KnowledgeArticlePayload {
+  id: number;
+  categoryOrder: number;
+  articleOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeCategoryOrder {
+  category: string;
+  articleIds: number[];
+}

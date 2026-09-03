@@ -6,6 +6,9 @@ import type {
   IndexSummary,
   InvestmentNote,
   InvestmentNotePayload,
+  KnowledgeCategoryOrder,
+  KnowledgeArticle,
+  KnowledgeArticlePayload,
   TradingVenue,
 } from "./types";
 
@@ -168,4 +171,31 @@ export function updateInvestmentNote(
 
 export function deleteInvestmentNote(noteId: number): Promise<{ deleted: boolean }> {
   return sendJson<{ deleted: boolean }>(`/notes/${noteId}`, "DELETE");
+}
+
+export function getKnowledgeArticles(signal?: AbortSignal): Promise<KnowledgeArticle[]> {
+  return getJson<KnowledgeArticle[]>("/knowledge", signal);
+}
+
+export function createKnowledgeArticle(
+  payload: KnowledgeArticlePayload,
+): Promise<KnowledgeArticle> {
+  return sendJson<KnowledgeArticle>("/knowledge", "POST", payload);
+}
+
+export function updateKnowledgeArticle(
+  articleId: number,
+  payload: KnowledgeArticlePayload,
+): Promise<KnowledgeArticle> {
+  return sendJson<KnowledgeArticle>(`/knowledge/${articleId}`, "PUT", payload);
+}
+
+export function reorderKnowledgeArticles(
+  categories: KnowledgeCategoryOrder[],
+): Promise<KnowledgeArticle[]> {
+  return sendJson<KnowledgeArticle[]>("/knowledge/order", "PUT", { categories });
+}
+
+export function deleteKnowledgeArticle(articleId: number): Promise<{ deleted: boolean }> {
+  return sendJson<{ deleted: boolean }>(`/knowledge/${articleId}`, "DELETE");
 }

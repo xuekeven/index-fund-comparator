@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -260,6 +261,38 @@ class InvestmentNote(Base, TimestampMixin):
             name="ck_investment_note_action",
         ),
         Index("ix_investment_note_user_date", "user_id", "note_date"),
+    )
+
+
+class KnowledgeArticle(Base, TimestampMixin):
+    __tablename__ = "knowledge_article"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    category: Mapped[str] = mapped_column(String(80), nullable=False)
+    category_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    article_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    summary: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    content_markdown: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("''")
+    )
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    sources: Mapped[list[dict[str, str | None]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    reviewed_at: Mapped[date | None] = mapped_column(Date)
+
+    __table_args__ = (
+        Index("ix_knowledge_article_user_category", "user_id", "category"),
+        Index(
+            "ix_knowledge_article_user_order",
+            "user_id",
+            "category_order",
+            "article_order",
+        ),
     )
 
 

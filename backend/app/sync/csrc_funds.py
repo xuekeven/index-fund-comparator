@@ -440,6 +440,38 @@ def _code_chunks(value: str) -> tuple[str, ...]:
     return tuple(value[index:index + 6] for index in range(0, len(value), 6))
 
 
+_ANNOUNCEMENT_CODE_LABEL_PATTERN = (
+    r"(?:下属分级基金的交易代码|下属基金份额的交易代码|"
+    r"下属基金的交易代码|下属基金交易代码|"
+    r"涉及基金份额类别的交易代码|各基金份额类别(?:的)?交易代码)"
+)
+
+
+def _announcement_table_codes(compact: str) -> tuple[str, ...]:
+    """Read share codes from PDF tables, including currency-annotated cells."""
+    label_match = re.search(_ANNOUNCEMENT_CODE_LABEL_PATTERN, compact)
+    if label_match:
+        tail = compact[label_match.end():label_match.end() + 320]
+        boundary_match = re.search(
+            r"(?:该分级基金是否|该基金份额是否|该基金份额类别是否|"
+            r"各基金份额类别是否|下属分级基金是否|限制申购金额|"
+            r"金额单位|2[、.]其他)",
+            tail,
+        )
+        code_block = tail[:boundary_match.start()] if boundary_match else tail
+        codes: list[str] = []
+        for digit_run in re.findall(r"(?<!\d)\d{6,}(?!\d)", code_block):
+            if len(digit_run) % 6 == 0:
+                codes.extend(_code_chunks(digit_run))
+        if codes:
+            return tuple(dict.fromkeys(codes))
+
+    # Some PDF tables are extracted column-first, leaving the label after
+    # the concatenated codes: ``018966...021773额的交易代码``.
+    reverse_match = re.search(r"((?:\d{6})+)额的交易代码", compact)
+    return _code_chunks(reverse_match.group(1)) if reverse_match else ()
+
+
 def _summary_share_name(compact: str, code: str) -> str:
     patterns = (
         rf"下属基金简称(.+?)下属基金(?:交易)?代码{code}",
@@ -643,18 +675,7 @@ def _announcement_share_codes(
             if share.share_class in classes and share_is_in_scope(share)
         ]
 
-    match = re.search(
-        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|"
-        r"下属基金交易代码|涉及基金份额类别的交易代码|"
-        r"各基金份额类别(?:的)?交易代码)"
-        r"((?:\d{6})+)",
-        compact,
-    )
-    if match is None:
-        # Some PDF tables are extracted column-first, leaving the label after
-        # the concatenated codes: ``018966...021773额的交易代码``.
-        match = re.search(r"((?:\d{6})+)额的交易代码", compact)
-    codes = list(_code_chunks(match.group(1))) if match else []
+    codes = list(_announcement_table_codes(compact))
     codes = [
         code for code in codes
         if code in shares and share_is_in_scope(shares[code])
@@ -709,18 +730,9 @@ def _announcement_limits(
     shares: dict[str, SummaryShare],
 ) -> dict[str, Decimal]:
     limits: dict[str, Decimal] = {}
-    code_match = re.search(
-        r"(?:下属分级基金的交易代码|下属基金份额的交易代码|下属基金的交易代码|"
-        r"下属基金交易代码|涉及基金份额类别的交易代码|"
-        r"各基金份额类别(?:的)?交易代码)"
-        r"((?:\d{6})+)",
-        compact,
-    )
-    if code_match is None:
-        code_match = re.search(r"((?:\d{6})+)额的交易代码", compact)
     ordered_codes = [
         code
-        for code in _code_chunks(code_match.group(1) if code_match else "")
+        for code in _announcement_table_codes(compact)
         if code in shares
     ]
 
@@ -1028,15 +1040,7 @@ def discover_subscription_shares(
     discovered: dict[str, tuple[SummaryShare, str]] = {}
     for document, text in announcements:
         compact = re.sub(r"\s+", "", text)
-        code_match = re.search(
-            r"(?:下属分级基金的交易代码|下属基金份额的交易代码|"
-            r"下属基金的交易代码|下属基金交易代码|"
-            r"涉及基金份额类别的交易代码)((?:\d{6})+)",
-            compact,
-        )
-        if code_match is None:
-            code_match = re.search(r"((?:\d{6})+)额的交易代码", compact)
-        codes = _code_chunks(code_match.group(1)) if code_match else ()
+        codes = _announcement_table_codes(compact)
         unit_match = re.search(
             r"金额单位((?:人民币元|美元)+)下属基金份额的限制申购金额",
             compact,
@@ -1095,10 +1099,24 @@ def discover_subscription_shares(
             _, currency, currency_form = share_identity(context)
             if index < len(units):
                 currency = "美元" if units[index] == "美元" else "人民币"
+            currency_annotation = re.search(
+                rf"{code}[（(](人民币|美元(?:现汇|现钞)?)[）)]",
+                compact,
+            )
+            if currency_annotation:
+                annotation = currency_annotation.group(1)
+                currency = "美元" if annotation.startswith("美元") else "人民币"
+                currency_form = (
+                    annotation.removeprefix("美元") or None
+                    if currency == "美元"
+                    else None
+                )
             suffix = share_class or ""
             if currency == "美元":
                 suffix += f"（美元{currency_form or ''}）"
             display_name = explicit_display_name or f"{product_name}{suffix}"
+            if currency == "美元" and "美元" not in normalize_name(display_name):
+                display_name += f"（美元{currency_form or ''}）"
             merge_summary_share(
                 discovered,
                 SummaryShare(
@@ -2432,18 +2450,6 @@ def run_details_sync(
                                 share.code,
                                 max_nav_date,
                             )
-                            current_eid_dates = [
-                                record.nav_date
-                                for record in records
-                                if record.code == share.code
-                            ]
-                            current_eid_has_year = bool(
-                                current_eid_dates
-                                and min(current_eid_dates)
-                                <= max_nav_date - timedelta(days=370)
-                            )
-                            if official_lookback == 45 or current_eid_has_year:
-                                continue
                             try:
                                 fallback_records = company_nav_fetcher.fetch(
                                     detail.manager,
