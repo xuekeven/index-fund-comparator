@@ -51,7 +51,7 @@ if grep -q 'app\.sync\.szse_quotes' "${FAKE_CRONTAB_STATE}"; then
   echo "Legacy SZSE quote job was not removed" >&2
   exit 1
 fi
-grep -q '^0 16 \* \* 1-5 .*app\.sync\.sse_details' "${FAKE_CRONTAB_STATE}"
+grep -q '^0 22 \* \* 1-5 .*app\.sync\.sse_details' "${FAKE_CRONTAB_STATE}"
 grep -q '^0 9 \* \* 1 .*app\.sync\.szse_funds' "${FAKE_CRONTAB_STATE}"
 grep -q '^0 22 \* \* 1-5 .*app\.sync\.szse_details' "${FAKE_CRONTAB_STATE}"
 grep -q '^0 9 1 \* \* .*app\.sync\.csrc_funds' "${FAKE_CRONTAB_STATE}"

@@ -6,7 +6,9 @@ import type { FormEvent } from "react";
 import {
   createInvestmentNote,
   deleteInvestmentNote,
+  getContentOptions,
   getInvestmentNotes,
+  updateContentOptions,
   updateInvestmentNote,
 } from "@/lib/api";
 import type {
@@ -14,10 +16,12 @@ import type {
   InvestmentNoteCategory,
   InvestmentNotePayload,
 } from "@/lib/types";
-import { CloseIcon, SearchIcon } from "./icons";
+import { ContentOptionDialog } from "./content-option-dialog";
+import { CloseIcon, SearchIcon, SettingsIcon } from "./icons";
+import { MarkdownRenderer } from "./markdown-renderer";
 
-const CATEGORY_OPTIONS: InvestmentNoteCategory[] = ["长期", "实时"];
-const SOURCE_OPTIONS = ["自我总结", "教主-群聊", "教主-微博", "猫笔刀-日报", "仓鼠投资-微博"] as const;
+const CATEGORY_OPTIONS: InvestmentNoteCategory[] = ["实时", "长期"];
+const DEFAULT_SOURCE_OPTIONS = ["自我总结", "教主-群聊", "教主-微博", "猫笔刀-日报", "仓鼠投资-微博"];
 
 type NoteDraft = Omit<InvestmentNotePayload, "tags" | "indexIds" | "fundCodes"> & {
   tags: string;
@@ -27,10 +31,10 @@ function today() {
   return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
 }
 
-function emptyDraft(): NoteDraft {
+function emptyDraft(sourceOptions: string[] = DEFAULT_SOURCE_OPTIONS): NoteDraft {
   return {
     noteDate: today(), title: "", category: "长期", action: null,
-    sourceName: SOURCE_OPTIONS[0], sourceUrl: "", sourceExcerpt: "", ownSummary: "",
+    sourceName: sourceOptions[0] ?? "", sourceUrl: "", sourceExcerpt: "", ownSummary: "",
     contentMarkdown: "", tags: "",
   };
 }
@@ -75,33 +79,6 @@ function draftToPayload(draft: NoteDraft): InvestmentNotePayload {
 function formatNoteDate(value: string) {
   const [year, month, day] = value.split("-");
   return { year, short: month + "-" + day, full: year + "年" + month + "月" + day + "日" };
-}
-
-function NoteText({ text }: { text: string }) {
-  const normalized = text.trim();
-  if (!normalized) return null;
-  const lines = normalized.split(/\r?\n/);
-  return (
-    <div className="note-text">
-      {lines.map((line, index) => {
-        const content = line.trim();
-        const heading = content.match(/^(#{1,3})\s+(.+)$/);
-        const key = content + "-" + index;
-        if (!content) return <span className="note-text-break" aria-hidden="true" key={key} />;
-        if (heading) {
-          const level = heading[1].length;
-          if (level === 1) return <h3 className="note-text-heading level-1" key={key}>{heading[2]}</h3>;
-          if (level === 2) return <h4 className="note-text-heading level-2" key={key}>{heading[2]}</h4>;
-          return <h5 className="note-text-heading level-3" key={key}>{heading[2]}</h5>;
-        }
-        return content.startsWith("- ") ? (
-          <p className="note-bullet" key={key}>{content.slice(2)}</p>
-        ) : (
-          <p key={key}>{content}</p>
-        );
-      })}
-    </div>
-  );
 }
 
 type NoteSelectProps = {
@@ -221,9 +198,9 @@ function NoteReader({ note, active, saving, onEdit, onDelete }: NoteReaderProps)
           <button className="danger" type="button" disabled={saving} onClick={() => onDelete(note)}>删除</button>
         </div>
       </header>
-      {note.sourceExcerpt && <section className="note-opinion-card"><span>观点归纳</span><NoteText text={note.sourceExcerpt} /></section>}
-      {note.sourceName !== "自我总结" && note.ownSummary && <section className="note-summary-card"><span>自我总结</span><NoteText text={note.ownSummary} /></section>}
-      {note.contentMarkdown && <section className="note-body-card"><h3>观察计划</h3><NoteText text={note.contentMarkdown} /></section>}
+      {note.sourceExcerpt && <section className="note-opinion-card"><span>观点归纳</span><MarkdownRenderer content={note.sourceExcerpt} /></section>}
+      {note.sourceName !== "自我总结" && note.ownSummary && <section className="note-summary-card"><span>自我总结</span><MarkdownRenderer content={note.ownSummary} /></section>}
+      {note.contentMarkdown && <section className="note-body-card"><h3>观察计划</h3><MarkdownRenderer content={note.contentMarkdown} /></section>}
     </section>
   );
 }
@@ -232,24 +209,30 @@ export function InvestmentNotes() {
   const [notes, setNotes] = useState<InvestmentNote[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [query, setQuery] = useState("");
-  const [category, setCategory] = useState<InvestmentNoteCategory>("长期");
+  const [category, setCategory] = useState<InvestmentNoteCategory>("实时");
   const [year, setYear] = useState("全部");
   const [source, setSource] = useState("全部");
   const [openSelect, setOpenSelect] = useState<string | null>(null);
   const [editing, setEditing] = useState<"new" | number | null>(null);
+  const [managingSources, setManagingSources] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<InvestmentNote | null>(null);
   const [pendingScrollId, setPendingScrollId] = useState<number | null>(null);
   const [draft, setDraft] = useState<NoteDraft>(emptyDraft);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [sourceOptions, setSourceOptions] = useState<string[]>(DEFAULT_SOURCE_OPTIONS);
   const [error, setError] = useState<string | null>(null);
   const deleteConfirmRef = useRef<HTMLButtonElement>(null);
   const notePanelRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-    getInvestmentNotes(controller.signal)
-      .then((items) => {
+    Promise.all([
+      getInvestmentNotes(controller.signal),
+      getContentOptions("investment_note_source", controller.signal),
+    ])
+      .then(([items, optionResponse]) => {
+        setSourceOptions(optionResponse.values);
         setNotes(items);
         setActiveId((current) => current ?? items[0]?.id ?? null);
         setError(null);
@@ -309,11 +292,20 @@ export function InvestmentNotes() {
     () => Array.from(new Set(notes.map((note) => note.noteDate.slice(0, 4)))).sort().reverse(),
     [notes],
   );
-  const sources = useMemo(
-    () => Array.from(new Set(
+  const sources = useMemo(() => {
+    const usedSources = new Set(
       notes.map((note) => note.sourceName).filter((value): value is string => Boolean(value)),
-    )).sort((left, right) => left.localeCompare(right, "zh-CN")),
-    [notes],
+    );
+    const configuredSources = sourceOptions.filter((value) => usedSources.has(value));
+    const historicalSources = Array.from(usedSources)
+      .filter((value) => !sourceOptions.includes(value))
+      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+    return [...configuredSources, ...historicalSources];
+  }, [notes, sourceOptions]);
+
+  const noteSourceOptions = useMemo(
+    () => Array.from(new Set([...(draft.sourceName ? [draft.sourceName] : []), ...sourceOptions])),
+    [draft.sourceName, sourceOptions],
   );
 
   const filteredNotes = useMemo(() => {
@@ -395,7 +387,7 @@ export function InvestmentNotes() {
   }, [filteredNotes]);
 
   function startNew() {
-    setDraft(emptyDraft()); setEditing("new"); setOpenSelect(null); setError(null);
+    setDraft(emptyDraft(sourceOptions)); setEditing("new"); setOpenSelect(null); setError(null);
   }
 
   function startEdit(note: InvestmentNote) {
@@ -449,6 +441,9 @@ export function InvestmentNotes() {
           </div>
           <div className="notes-heading-actions">
             <button className="notes-new-button" type="button" onClick={startNew}>＋ 新建笔记</button>
+            <button className="content-options-button" type="button" onClick={() => setManagingSources(true)} aria-label="管理投资笔记" title="管理投资笔记">
+              <SettingsIcon />
+            </button>
           </div>
         </header>
 
@@ -551,16 +546,29 @@ export function InvestmentNotes() {
                   <label><span>标题</span><input required maxLength={200} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
                   <div className="note-form-control"><span>类型</span><NoteSelect id="note-category" value={draft.category} options={CATEGORY_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "category"} onOpenChange={(open) => setOpenSelect(open ? "category" : null)} onChange={(value) => setDraft({ ...draft, category: value as InvestmentNoteCategory })} /></div>
                   <label><span>标签</span><input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="QDII、风控、估值" /></label>
-                  <div className="note-form-control"><span>来源</span><NoteSelect id="note-source" value={draft.sourceName ?? ""} options={SOURCE_OPTIONS.map((item) => [item, item] as const)} open={openSelect === "source"} onOpenChange={(open) => setOpenSelect(open ? "source" : null)} onChange={(value) => setDraft({ ...draft, sourceName: value, ownSummary: value === "自我总结" ? "" : draft.ownSummary })} /></div>
+                  <div className="note-form-control"><span>来源</span><NoteSelect id="note-source" value={draft.sourceName ?? ""} options={noteSourceOptions.map((item) => [item, item] as const)} open={openSelect === "source"} onOpenChange={(open) => setOpenSelect(open ? "source" : null)} onChange={(value) => setDraft({ ...draft, sourceName: value, ownSummary: value === "自我总结" ? "" : draft.ownSummary })} /></div>
                   <label><span>来源链接</span><input value={draft.sourceUrl ?? ""} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} placeholder="https://…" /></label>
                 </div>
-                <label className="note-form-field"><span>观点归纳</span><textarea rows={3} value={draft.sourceExcerpt ?? ""} onChange={(event) => setDraft({ ...draft, sourceExcerpt: event.target.value })} placeholder="每行可用“- ”开头记录一个观点" /></label>
+                <label className="note-form-field"><span>观点归纳</span><textarea className="note-opinion-input" rows={3} value={draft.sourceExcerpt ?? ""} onChange={(event) => setDraft({ ...draft, sourceExcerpt: event.target.value })} placeholder="每行可用“- ”开头记录一个观点" /></label>
                 {draft.sourceName !== "自我总结" && <label className="note-form-field"><span>自我总结</span><textarea rows={3} value={draft.ownSummary ?? ""} onChange={(event) => setDraft({ ...draft, ownSummary: event.target.value })} placeholder="写下自己的判断、依据和失效条件" /></label>}
                 <label className="note-form-field"><span>观察计划</span><textarea rows={3} value={draft.contentMarkdown} onChange={(event) => setDraft({ ...draft, contentMarkdown: event.target.value })} placeholder="交易计划、复盘结果或后续观察…" /></label>
                 <div className="note-editor-actions"><button type="button" disabled={saving} onClick={() => { setEditing(null); setOpenSelect(null); }}>取消</button><button className="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存笔记"}</button></div>
               </form>
             </div>
         </div>
+      )}
+
+      {managingSources && (
+        <ContentOptionDialog
+          pageTitle="投资笔记"
+          itemLabel="来源"
+          values={sourceOptions}
+          onClose={() => setManagingSources(false)}
+          onSave={async (values) => {
+            const response = await updateContentOptions("investment_note_source", values);
+            setSourceOptions(response.values);
+          }}
+        />
       )}
 
       {deleteTarget !== null && (

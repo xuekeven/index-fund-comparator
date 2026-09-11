@@ -12,7 +12,6 @@ import {
   calculateQdiiPurchaseLimits,
   EXCHANGES,
   filterFundRows,
-  latestTradingDataDate,
   sortFundRows,
   SUBSCRIPTION_STATUS_OPTIONS,
   VENUES,
@@ -22,6 +21,7 @@ import type {
   DataFreshness,
   FundComparisonRow,
   FundTag,
+  FundTagState,
   IndexSummary,
 } from "@/lib/types";
 import { CloseIcon, MarkIcon, SearchIcon } from "./icons";
@@ -55,13 +55,24 @@ const INDEX_ORDER: Record<string, number> = {
   "csi-500": 2,
 };
 const FUND_TAG_ORDER: FundTag[] = ["favorite", "holding", "recurring"];
+const MOBILE_SORT_OPTIONS: Array<{ key: FundSortKey; label: string }> = [
+  { key: "code", label: "代码" },
+  { key: "name", label: "份额" },
+  { key: "expenseRate", label: "运作费率" },
+  { key: "scale", label: "规模" },
+  { key: "return1m", label: "近1月" },
+  { key: "return3m", label: "近3月" },
+  { key: "return6m", label: "近6月" },
+  { key: "returnYtd", label: "今年来" },
+  { key: "return1y", label: "近1年" },
+];
 
 function replaceFundTags(
   rows: FundComparisonRow[],
   code: string,
-  tags: FundTag[],
+  state: FundTagState,
 ) {
-  return rows.map((fund) => fund.code === code ? { ...fund, tags } : fund);
+  return rows.map((fund) => fund.code === code ? { ...fund, ...state } : fund);
 }
 
 function fundCacheKey(
@@ -82,11 +93,6 @@ function formatSyncTime(value: string | null) {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
-}
-
-function formatTradeDate(value: string | null) {
-  if (!value) return "暂无交易日";
-  return value.slice(5).replace("-", "/");
 }
 
 function formatPurchaseLimit(value: number) {
@@ -164,7 +170,7 @@ export function ComparisonDashboard() {
   const [activePage, setActivePage] = useState<"funds" | "notes" | "knowledge">(
     () => window.location.hash === "#notes"
       ? "notes"
-      : window.location.hash === "#knowledge"
+      : window.location.hash.startsWith("#knowledge")
         ? "knowledge"
         : "funds",
   );
@@ -205,6 +211,20 @@ export function ComparisonDashboard() {
   const fundRequestId = useRef(0);
   const comparisonController = useRef<AbortController | null>(null);
   const taggedFundsController = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    function syncPageFromUrl() {
+      setActivePage(
+        window.location.hash === "#notes"
+          ? "notes"
+          : window.location.hash.startsWith("#knowledge")
+            ? "knowledge"
+            : "funds",
+      );
+    }
+    window.addEventListener("hashchange", syncPageFromUrl);
+    return () => window.removeEventListener("hashchange", syncPageFromUrl);
+  }, []);
 
   const loadIndices = useCallback(async (signal?: AbortSignal) => {
     const items = await getIndices(signal);
@@ -317,7 +337,10 @@ export function ComparisonDashboard() {
 
     function closeOnOutsideClick(event: PointerEvent) {
       const target = event.target;
-      if (target instanceof Element && target.closest(".multi-filter")) return;
+      if (
+        target instanceof Element
+        && target.closest(".multi-filter, .mobile-sort")
+      ) return;
       setOpenFilter(null);
     }
 
@@ -368,11 +391,6 @@ export function ComparisonDashboard() {
       query,
     }),
     [currencies, exchanges, funds, query, shareClasses, subscriptionStatuses, taggedOnly, venue],
-  );
-
-  const tradeDate = useMemo(
-    () => latestTradingDataDate(visibleFunds),
-    [visibleFunds],
   );
 
   const qdiiPurchaseLimits = useMemo(
@@ -444,37 +462,93 @@ export function ComparisonDashboard() {
     });
   }
 
-  function applyFundTags(code: string, tags: FundTag[]) {
-    setFunds((current) => replaceFundTags(current, code, tags));
-    setComparisonFunds((current) => replaceFundTags(current, code, tags));
+  function applyFundTags(code: string, state: FundTagState) {
+    setFunds((current) => replaceFundTags(current, code, state));
+    setComparisonFunds((current) => replaceFundTags(current, code, state));
     fundCache.current.forEach((cached, key) => {
       fundCache.current.set(key, {
         ...cached,
-        items: replaceFundTags(cached.items, code, tags),
+        items: replaceFundTags(cached.items, code, state),
       });
     });
   }
 
-  async function saveFundTags(code: string, tags: FundTag[]) {
+  async function saveFundTags(
+    code: string,
+    tags: FundTag[],
+    holdingAmount: number | null,
+    recurringAmount: number | null,
+  ) {
     const fund = funds.find((item) => item.code === code);
     if (!fund || tagSavingCodes.includes(code)) return false;
 
-    const previousTags = fund.tags;
+    const previousState: FundTagState = {
+      tags: fund.tags,
+      holdingAmount: fund.holdingAmount,
+      recurringAmount: fund.recurringAmount,
+    };
     const nextTags = FUND_TAG_ORDER.filter((item) => tags.includes(item));
+    const nextState: FundTagState = {
+      tags: nextTags,
+      holdingAmount: nextTags.includes("holding") ? holdingAmount : null,
+      recurringAmount: nextTags.includes("recurring") ? recurringAmount : null,
+    };
     setTagError(null);
     setTagSavingCodes((current) => [...current, code]);
-    applyFundTags(code, nextTags);
+    applyFundTags(code, nextState);
     try {
-      const response = await updateFundTags(code, nextTags);
-      applyFundTags(code, response.tags);
+      const response = await updateFundTags(
+        code,
+        nextTags,
+        nextState.holdingAmount,
+        nextState.recurringAmount,
+      );
+      applyFundTags(code, response);
       return true;
     } catch {
-      applyFundTags(code, previousTags);
+      applyFundTags(code, previousState);
       setTagError(`${code} 的标签保存失败，请稍后重试。`);
       return false;
     } finally {
       setTagSavingCodes((current) => current.filter((item) => item !== code));
     }
+  }
+
+  async function saveTaggedFundAmounts(
+    tag: "holding" | "recurring",
+    updates: Array<{ fundCode: string; amount: number | null }>,
+  ) {
+    const fundsByCode = new Map(taggedFunds.map((fund) => [fund.code, fund]));
+    const codes = updates.map((update) => update.fundCode);
+    setTagError(null);
+    setTagSavingCodes((current) => [...new Set([...current, ...codes])]);
+
+    const results = await Promise.allSettled(updates.map(({ fundCode, amount }) => {
+      const fund = fundsByCode.get(fundCode);
+      if (!fund) return Promise.reject(new Error(`Fund ${fundCode} not found`));
+      return updateFundTags(
+        fundCode,
+        fund.tags,
+        tag === "holding" ? amount : fund.holdingAmount,
+        tag === "recurring" ? amount : fund.recurringAmount,
+      );
+    }));
+
+    const savedStates = new Map<string, FundTagState>();
+    results.forEach((result) => {
+      if (result.status !== "fulfilled") return;
+      savedStates.set(result.value.fundCode, result.value);
+      applyFundTags(result.value.fundCode, result.value);
+    });
+    setTaggedFunds((current) => current.map((fund) => {
+      const state = savedStates.get(fund.code);
+      return state ? { ...fund, ...state } : fund;
+    }));
+    setTagSavingCodes((current) => current.filter((code) => !codes.includes(code)));
+
+    const saved = savedStates.size === updates.length;
+    if (!saved) setTagError("部分基金的持有或定投数据保存失败，请重试。");
+    return saved;
   }
 
   async function openTaggedFunds(tag: FundTag) {
@@ -743,6 +817,81 @@ export function ComparisonDashboard() {
                 />
                 <i aria-hidden="true">{taggedOnly ? "✓" : ""}</i>
               </label>
+              <div className={`mobile-sort ${openFilter === "mobile-sort" ? "open" : ""}`}>
+                <button
+                  className="mobile-sort-trigger"
+                  type="button"
+                  aria-expanded={openFilter === "mobile-sort"}
+                  aria-controls="mobile-sort-menu"
+                  onClick={() => setOpenFilter((current) => (
+                    current === "mobile-sort" ? null : "mobile-sort"
+                  ))}
+                >
+                  <span>排序</span>
+                  <strong>
+                    {sortKey
+                      ? `${MOBILE_SORT_OPTIONS.find((option) => option.key === sortKey)?.label ?? ""} ${sortDirection === "asc" ? "↑" : "↓"}`
+                      : "默认"}
+                  </strong>
+                </button>
+                {openFilter === "mobile-sort" && (
+                  <div className="mobile-sort-menu" id="mobile-sort-menu">
+                    <span className="mobile-sort-label">排序字段</span>
+                    <div className="mobile-sort-fields">
+                      {MOBILE_SORT_OPTIONS.map((option) => (
+                        <button
+                          key={option.key}
+                          className={sortKey === option.key ? "active" : ""}
+                          type="button"
+                          onClick={() => {
+                            if (sortKey !== option.key) {
+                              setSortKey(option.key);
+                              setSortDirection(
+                                option.key === "code" || option.key === "name" ? "asc" : "desc",
+                              );
+                            }
+                          }}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="mobile-sort-label">排序方向</span>
+                    <div className="mobile-sort-directions">
+                      <button
+                        className={sortDirection === "asc" && sortKey ? "active" : ""}
+                        type="button"
+                        disabled={!sortKey}
+                        onClick={() => setSortDirection("asc")}
+                      >
+                        升序 ↑
+                      </button>
+                      <button
+                        className={sortDirection === "desc" && sortKey ? "active" : ""}
+                        type="button"
+                        disabled={!sortKey}
+                        onClick={() => setSortDirection("desc")}
+                      >
+                        降序 ↓
+                      </button>
+                    </div>
+                    <div className="mobile-sort-actions">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSortKey(null);
+                          setSortDirection("asc");
+                        }}
+                      >
+                        恢复默认
+                      </button>
+                      <button className="primary" type="button" onClick={() => setOpenFilter(null)}>
+                        完成
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
             <label className="search-box">
               <SearchIcon />
@@ -769,11 +918,6 @@ export function ComparisonDashboard() {
                 <span className="status-dot" />
                 <span>{primaryFreshnessLabel}</span>
                 <strong>{formatSyncTime(primaryFreshness)}</strong>
-              </p>
-              <p className="fund-trade-date">
-                <span className="status-dot" />
-                <span>交易日</span>
-                <strong>{formatTradeDate(tradeDate)}</strong>
               </p>
               {venue === "场外" && qdiiPurchaseLimits.hasQdii && (
                 <p className="fund-purchase-limit">
@@ -879,6 +1023,7 @@ export function ComparisonDashboard() {
           error={taggedFundsError}
           onClose={closeTaggedFunds}
           onRetry={() => void openTaggedFunds(taggedDialogTag)}
+          onAmountsSave={saveTaggedFundAmounts}
         />
       )}
       {syncInfoOpen && (

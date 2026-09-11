@@ -10,6 +10,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import Settings, get_settings
 from app.models import (
     ComparisonResponse,
+    ContentOptionList,
+    ContentOptionType,
+    ContentOptionUpdate,
     FundListResponse,
     FundTagResponse,
     FundTagUpdate,
@@ -187,10 +190,45 @@ def update_fund_tags(
     payload: FundTagUpdate,
     repository: RepositoryDep,
 ) -> FundTagResponse:
-    tags = repository.set_fund_tags(fund_code, payload.tags)
-    if tags is None:
+    tag_state = repository.set_fund_tags(
+        fund_code,
+        payload.tags,
+        payload.holding_amount,
+        payload.recurring_amount,
+    )
+    if tag_state is None:
         raise HTTPException(status_code=404, detail="Fund not found")
-    return FundTagResponse(fund_code=fund_code, tags=tags)
+    return FundTagResponse(fund_code=fund_code, **tag_state.model_dump())
+
+
+@app.get(
+    f"{settings.api_prefix}/content-options/{{option_type}}",
+    response_model=ContentOptionList,
+)
+def list_content_options(
+    option_type: ContentOptionType,
+    repository: RepositoryDep,
+) -> ContentOptionList:
+    return ContentOptionList(
+        option_type=option_type,
+        values=repository.list_content_options(option_type),
+    )
+
+
+@app.put(
+    f"{settings.api_prefix}/content-options/{{option_type}}",
+    response_model=ContentOptionList,
+)
+def update_content_options(
+    option_type: ContentOptionType,
+    payload: ContentOptionUpdate,
+    repository: RepositoryDep,
+) -> ContentOptionList:
+    try:
+        values = repository.set_content_options(option_type, payload.values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ContentOptionList(option_type=option_type, values=values)
 
 
 @app.get(

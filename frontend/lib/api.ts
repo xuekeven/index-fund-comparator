@@ -1,5 +1,7 @@
 import type {
   ComparisonResponse,
+  ContentOptionResponse,
+  ContentOptionType,
   FundListResponse,
   FundTag,
   FundTagResponse,
@@ -127,10 +129,12 @@ export function getComparison(
 export function updateFundTags(
   fundCode: string,
   tags: FundTag[],
+  holdingAmount: number | null,
+  recurringAmount: number | null,
 ): Promise<FundTagResponse> {
   return putJson<FundTagResponse>(
     `/funds/${encodeURIComponent(fundCode)}/tags`,
-    { tags },
+    { tags, holdingAmount, recurringAmount },
   );
 }
 
@@ -147,6 +151,20 @@ export function getSyncTaskHistory(
 
 export function startSyncTask(task: SyncTaskKey): Promise<SyncTaskSnapshot> {
   return postJson<SyncTaskSnapshot>(`/sync-tasks/${task}`);
+}
+
+export function getContentOptions(
+  optionType: ContentOptionType,
+  signal?: AbortSignal,
+): Promise<ContentOptionResponse> {
+  return getJson<ContentOptionResponse>(`/content-options/${optionType}`, signal);
+}
+
+export function updateContentOptions(
+  optionType: ContentOptionType,
+  values: string[],
+): Promise<ContentOptionResponse> {
+  return putJson<ContentOptionResponse>(`/content-options/${optionType}`, { values });
 }
 
 

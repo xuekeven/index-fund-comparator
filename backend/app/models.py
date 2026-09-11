@@ -106,15 +106,22 @@ class FundComparisonRow(ApiModel):
     source_time: datetime | None = None
     note: str | None = None
     tags: list[FundTagType] = Field(default_factory=list)
+    holding_amount: float | None = Field(default=None, ge=0)
+    recurring_amount: float | None = Field(default=None, ge=0)
 
 
-class FundTagUpdate(ApiModel):
+class FundTagState(ApiModel):
     tags: list[FundTagType] = Field(default_factory=list, max_length=3)
+    holding_amount: float | None = Field(default=None, ge=0)
+    recurring_amount: float | None = Field(default=None, ge=0)
 
 
-class FundTagResponse(ApiModel):
+class FundTagUpdate(FundTagState):
+    pass
+
+
+class FundTagResponse(FundTagState):
     fund_code: str
-    tags: list[FundTagType]
 
 
 class DataFreshness(ApiModel):
@@ -212,6 +219,20 @@ class KnowledgeCategoryOrder(ApiModel):
 
 class KnowledgeReorderRequest(ApiModel):
     categories: list[KnowledgeCategoryOrder]
+
+
+class ContentOptionType(str, Enum):
+    INVESTMENT_NOTE_SOURCE = "investment_note_source"
+    KNOWLEDGE_CATEGORY = "knowledge_category"
+
+
+class ContentOptionList(ApiModel):
+    option_type: ContentOptionType
+    values: list[str]
+
+
+class ContentOptionUpdate(ApiModel):
+    values: list[str] = Field(min_length=1, max_length=50)
 
 
 class KnowledgeArticleItem(KnowledgeArticlePayload):

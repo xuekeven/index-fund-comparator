@@ -11,6 +11,7 @@ from app.data.sample import FUND_ROWS, INDEX_ROWS
 from app.database import get_session_factory
 from app.database_models import (
     CalculatedMetric,
+    ContentOption,
     FeeHistory,
     FundListing,
     FundProduct,
@@ -27,9 +28,11 @@ from app.database_models import (
     UserFundTag,
 )
 from app.models import (
+    ContentOptionType,
     DataStatus,
     DataFreshness,
     FundComparisonRow,
+    FundTagState,
     FundTagType,
     IndexSummary,
     InvestmentNoteCreate,
@@ -57,6 +60,32 @@ FUND_TAG_ORDER = {
     FundTagType.HOLDING: 1,
     FundTagType.RECURRING: 2,
 }
+DEFAULT_CONTENT_OPTIONS: dict[ContentOptionType, tuple[str, ...]] = {
+    ContentOptionType.INVESTMENT_NOTE_SOURCE: (
+        "自我总结",
+        "教主-群聊",
+        "教主-微博",
+        "猫笔刀-日报",
+        "仓鼠投资-微博",
+    ),
+    ContentOptionType.KNOWLEDGE_CATEGORY: (
+        "资产配置",
+        "利率",
+        "债券",
+        "黄金",
+        "红利策略",
+        "交易工具",
+    ),
+}
+
+
+def _normalize_content_options(values: list[str]) -> list[str]:
+    normalized = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+    if not normalized:
+        raise ValueError("At least one option is required")
+    if any(len(value) > 200 for value in normalized):
+        raise ValueError("Option values must not exceed 200 characters")
+    return normalized
 
 
 def _normalized_note_values(
@@ -227,8 +256,20 @@ class FundRepository(ABC):
 
     @abstractmethod
     def set_fund_tags(
-        self, code: str, tags: list[FundTagType]
-    ) -> list[FundTagType] | None: ...
+        self,
+        code: str,
+        tags: list[FundTagType],
+        holding_amount: float | None = None,
+        recurring_amount: float | None = None,
+    ) -> FundTagState | None: ...
+
+    @abstractmethod
+    def list_content_options(self, option_type: ContentOptionType) -> list[str]: ...
+
+    @abstractmethod
+    def set_content_options(
+        self, option_type: ContentOptionType, values: list[str]
+    ) -> list[str]: ...
 
     @abstractmethod
     def list_notes(
@@ -322,6 +363,10 @@ class SampleFundRepository(FundRepository):
         self._next_note_id = 2
         self._knowledge_articles: list[KnowledgeArticleItem] = []
         self._next_knowledge_article_id = 1
+        self._content_options = {
+            option_type: list(values)
+            for option_type, values in DEFAULT_CONTENT_OPTIONS.items()
+        }
 
     def list_indices(self) -> list[IndexSummary]:
         return self._indices
@@ -358,15 +403,38 @@ class SampleFundRepository(FundRepository):
         return [funds_by_code[code] for code in codes if code in funds_by_code]
 
     def set_fund_tags(
-        self, code: str, tags: list[FundTagType]
-    ) -> list[FundTagType] | None:
+        self,
+        code: str,
+        tags: list[FundTagType],
+        holding_amount: float | None = None,
+        recurring_amount: float | None = None,
+    ) -> FundTagState | None:
         normalized = sorted(set(tags), key=FUND_TAG_ORDER.__getitem__)
+        state = FundTagState(
+            tags=normalized,
+            holding_amount=(
+                holding_amount if FundTagType.HOLDING in normalized else None
+            ),
+            recurring_amount=(
+                recurring_amount if FundTagType.RECURRING in normalized else None
+            ),
+        )
         for index, fund in enumerate(self._funds):
             if fund.code != code:
                 continue
-            self._funds[index] = fund.model_copy(update={"tags": normalized})
-            return normalized
+            self._funds[index] = fund.model_copy(update=state.model_dump())
+            return state
         return None
+
+    def list_content_options(self, option_type: ContentOptionType) -> list[str]:
+        return list(self._content_options[option_type])
+
+    def set_content_options(
+        self, option_type: ContentOptionType, values: list[str]
+    ) -> list[str]:
+        normalized = _normalize_content_options(values)
+        self._content_options[option_type] = normalized
+        return list(normalized)
 
     def list_notes(
         self,
@@ -803,7 +871,7 @@ class PostgresFundRepository(FundRepository):
                     row,
                     fees_by_share.get(row["share_id"], {}),
                     metrics_by_share.get(row["share_id"], {}),
-                    tags_by_share.get(row["share_id"], []),
+                    tags_by_share.get(row["share_id"], FundTagState()),
                 )
                 for row in row_dicts
             ]
@@ -833,15 +901,19 @@ class PostgresFundRepository(FundRepository):
                     row,
                     fees_by_share.get(row["share_id"], {}),
                     metrics_by_share.get(row["share_id"], {}),
-                    tags_by_share.get(row["share_id"], []),
+                    tags_by_share.get(row["share_id"], FundTagState()),
                 )
                 for row in row_dicts
             }
             return [funds_by_code[code] for code in codes if code in funds_by_code]
 
     def set_fund_tags(
-        self, code: str, tags: list[FundTagType]
-    ) -> list[FundTagType] | None:
+        self,
+        code: str,
+        tags: list[FundTagType],
+        holding_amount: float | None = None,
+        recurring_amount: float | None = None,
+    ) -> FundTagState | None:
         normalized = sorted(set(tags), key=FUND_TAG_ORDER.__getitem__)
         with self._session_factory() as session:
             share_id = session.scalar(
@@ -869,11 +941,59 @@ class PostgresFundRepository(FundRepository):
                     user_id=SINGLE_USER_ID,
                     fund_share_class_id=share_id,
                     tag_type=tag.value,
+                    amount=(
+                        holding_amount if tag == FundTagType.HOLDING
+                        else recurring_amount if tag == FundTagType.RECURRING
+                        else None
+                    ),
                 )
                 for tag in normalized
             )
             session.commit()
-            return normalized
+            return FundTagState(
+                tags=normalized,
+                holding_amount=(
+                    holding_amount if FundTagType.HOLDING in normalized else None
+                ),
+                recurring_amount=(
+                    recurring_amount if FundTagType.RECURRING in normalized else None
+                ),
+            )
+
+    def list_content_options(self, option_type: ContentOptionType) -> list[str]:
+        with self._session_factory() as session:
+            values = session.scalars(
+                select(ContentOption.value)
+                .where(
+                    ContentOption.user_id == SINGLE_USER_ID,
+                    ContentOption.option_type == option_type.value,
+                )
+                .order_by(ContentOption.sort_order.asc(), ContentOption.id.asc())
+            ).all()
+            return list(values) if values else list(DEFAULT_CONTENT_OPTIONS[option_type])
+
+    def set_content_options(
+        self, option_type: ContentOptionType, values: list[str]
+    ) -> list[str]:
+        normalized = _normalize_content_options(values)
+        with self._session_factory() as session:
+            session.execute(
+                delete(ContentOption).where(
+                    ContentOption.user_id == SINGLE_USER_ID,
+                    ContentOption.option_type == option_type.value,
+                )
+            )
+            session.add_all(
+                ContentOption(
+                    user_id=SINGLE_USER_ID,
+                    option_type=option_type.value,
+                    value=value,
+                    sort_order=sort_order,
+                )
+                for sort_order, value in enumerate(normalized)
+            )
+            session.commit()
+        return normalized
 
     def list_notes(
         self,
@@ -1366,31 +1486,46 @@ class PostgresFundRepository(FundRepository):
     @staticmethod
     def _load_user_tags(
         session: Session, share_ids: list[int]
-    ) -> dict[int, list[FundTagType]]:
+    ) -> dict[int, FundTagState]:
         if not share_ids:
             return {}
-        tags_by_share: dict[int, list[FundTagType]] = {}
+        values_by_share: dict[int, dict[str, Any]] = {}
         rows = session.execute(
-            select(UserFundTag.fund_share_class_id, UserFundTag.tag_type).where(
+            select(
+                UserFundTag.fund_share_class_id,
+                UserFundTag.tag_type,
+                UserFundTag.amount,
+            ).where(
                 UserFundTag.user_id == SINGLE_USER_ID,
                 UserFundTag.fund_share_class_id.in_(share_ids),
             )
         )
-        for share_id, tag_type in rows:
+        for share_id, tag_type, amount in rows:
             try:
-                tags_by_share.setdefault(share_id, []).append(FundTagType(tag_type))
+                tag = FundTagType(tag_type)
             except ValueError:
                 continue
-        for tags in tags_by_share.values():
-            tags.sort(key=FUND_TAG_ORDER.__getitem__)
-        return tags_by_share
+            values = values_by_share.setdefault(
+                share_id,
+                {"tags": [], "holding_amount": None, "recurring_amount": None},
+            )
+            values["tags"].append(tag)
+            if tag == FundTagType.HOLDING and amount is not None:
+                values["holding_amount"] = float(amount)
+            elif tag == FundTagType.RECURRING and amount is not None:
+                values["recurring_amount"] = float(amount)
+        result: dict[int, FundTagState] = {}
+        for share_id, values in values_by_share.items():
+            values["tags"].sort(key=FUND_TAG_ORDER.__getitem__)
+            result[share_id] = FundTagState(**values)
+        return result
 
     def _fund_row(
         self,
         row: dict[str, Any],
         fees: dict[str, float],
         latest_metrics: dict[str, CalculatedMetric],
-        tags: list[FundTagType],
+        tag_state: FundTagState,
     ) -> FundComparisonRow:
 
         management = fees.get("management")
@@ -1472,7 +1607,9 @@ class PostgresFundRepository(FundRepository):
             source_name=row["source_name"],
             source_url=row["source_url"],
             source_time=row["source_time"],
-            tags=tags,
+            tags=tag_state.tags,
+            holding_amount=tag_state.holding_amount,
+            recurring_amount=tag_state.recurring_amount,
         )
 
     @staticmethod

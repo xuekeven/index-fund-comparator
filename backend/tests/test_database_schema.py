@@ -18,6 +18,7 @@ CORE_TABLES = {
     "user_fund_tag",
     "investment_note",
     "knowledge_article",
+    "content_option",
 }
 
 
@@ -60,6 +61,13 @@ def test_single_user_tags_are_bound_to_fund_shares() -> None:
     assert "favorite" in str(tag_constraint.sqltext)
     assert "holding" in str(tag_constraint.sqltext)
     assert "recurring" in str(tag_constraint.sqltext)
+    assert "amount" in tag_table.columns
+    amount_constraint = next(
+        constraint
+        for constraint in tag_table.constraints
+        if constraint.name == "ck_user_fund_tag_amount"
+    )
+    assert ">= 0" in str(amount_constraint.sqltext)
 
 
 def test_fee_history_accepts_comprehensive_operating_rate() -> None:
@@ -93,6 +101,20 @@ def test_investment_notes_are_single_user_and_structured() -> None:
     assert "加仓" in str(action_constraint.sqltext)
     assert "index_ids" in note_table.columns
     assert "fund_codes" in note_table.columns
+
+
+def test_content_options_are_scoped_and_ordered() -> None:
+    option_table = Base.metadata.tables["content_option"]
+    constraint = next(
+        item for item in option_table.constraints if item.name == "ck_content_option_type"
+    )
+
+    assert "user_id" in option_table.columns
+    assert "investment_note_source" in str(constraint.sqltext)
+    assert "knowledge_category" in str(constraint.sqltext)
+    assert "ix_content_option_user_type_order" in {
+        index.name for index in option_table.indexes
+    }
 
 
 def test_knowledge_articles_store_stable_reference_fields() -> None:

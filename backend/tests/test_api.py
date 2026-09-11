@@ -147,12 +147,18 @@ def test_filter_funds_by_venue() -> None:
 def test_single_user_fund_tags_round_trip() -> None:
     response = client.put(
         "/api/v1/funds/006075/tags",
-        json={"tags": ["favorite", "holding", "recurring"]},
+        json={
+            "tags": ["favorite", "holding", "recurring"],
+            "holdingAmount": 0,
+            "recurringAmount": 125.5,
+        },
     )
     assert response.status_code == 200
     assert response.json() == {
         "fundCode": "006075",
         "tags": ["favorite", "holding", "recurring"],
+        "holdingAmount": 0.0,
+        "recurringAmount": 125.5,
     }
 
     funds = client.get("/api/v1/indices/sp-500/funds", params={"venue": "场外"})
@@ -160,10 +166,14 @@ def test_single_user_fund_tags_round_trip() -> None:
         item for item in funds.json()["items"] if item["code"] == "006075"
     )
     assert tagged_fund["tags"] == ["favorite", "holding", "recurring"]
+    assert tagged_fund["holdingAmount"] == 0.0
+    assert tagged_fund["recurringAmount"] == 125.5
 
     cleared = client.put("/api/v1/funds/006075/tags", json={"tags": []})
     assert cleared.status_code == 200
     assert cleared.json()["tags"] == []
+    assert cleared.json()["holdingAmount"] is None
+    assert cleared.json()["recurringAmount"] is None
 
 
 def test_single_user_fund_tags_validate_tag_and_fund() -> None:
@@ -178,6 +188,12 @@ def test_single_user_fund_tags_validate_tag_and_fund() -> None:
 
     assert invalid_tag.status_code == 422
     assert missing_fund.status_code == 404
+
+    negative_amount = client.put(
+        "/api/v1/funds/006075/tags",
+        json={"tags": ["holding"], "holdingAmount": -1},
+    )
+    assert negative_amount.status_code == 422
 
 
 def test_investment_notes_round_trip() -> None:
@@ -231,6 +247,29 @@ def test_investment_notes_validate_category_and_action() -> None:
         },
     )
     assert response.status_code == 422
+
+
+def test_content_options_round_trip() -> None:
+    source_defaults = client.get(
+        "/api/v1/content-options/investment_note_source"
+    ).json()["values"]
+    response = client.put(
+        "/api/v1/content-options/investment_note_source",
+        json={"values": ["自我总结", "测试来源", "测试来源"]},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "optionType": "investment_note_source",
+        "values": ["自我总结", "测试来源"],
+    }
+    assert client.put(
+        "/api/v1/content-options/investment_note_source", json={"values": []}
+    ).status_code == 422
+    restored = client.put(
+        "/api/v1/content-options/investment_note_source",
+        json={"values": source_defaults},
+    )
+    assert restored.status_code == 200
 
 
 def test_knowledge_articles_round_trip() -> None:

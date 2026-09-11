@@ -57,11 +57,18 @@ export interface FundComparisonRow {
   sourceTime: string | null;
   note: string | null;
   tags: FundTag[];
+  holdingAmount: number | null;
+  recurringAmount: number | null;
 }
 
-export interface FundTagResponse {
-  fundCode: string;
+export interface FundTagState {
   tags: FundTag[];
+  holdingAmount: number | null;
+  recurringAmount: number | null;
+}
+
+export interface FundTagResponse extends FundTagState {
+  fundCode: string;
 }
 
 export interface DataFreshness {
@@ -94,6 +101,12 @@ export interface ComparisonResponse {
 
 export type InvestmentNoteCategory = "长期" | "实时";
 export type InvestmentNoteAction = "加仓" | "减仓" | "清仓" | "持有" | "观察";
+export type ContentOptionType = "investment_note_source" | "knowledge_category";
+
+export interface ContentOptionResponse {
+  optionType: ContentOptionType;
+  values: string[];
+}
 
 export interface InvestmentNotePayload {
   noteDate: string;

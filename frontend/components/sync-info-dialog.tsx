@@ -213,12 +213,19 @@ const SYNC_ROWS: Array<{
       },
       {
         key: "B",
-        schedule: "周一至周五 16:00",
-        sources: [{
-          label: "上交所",
-          url: "https://etf.sse.com.cn/fundlist/",
-          description: "获取收盘价、基金净值、基金规模和交易日期",
-        }],
+        schedule: "周一至周五 22:00",
+        sources: [
+          {
+            label: "上交所",
+            url: "https://etf.sse.com.cn/fundlist/",
+            description: "获取收盘价、IOPV、基金规模和行情日期",
+          },
+          {
+            label: "证监会基金电子披露网站",
+            url: "http://eid.csrc.gov.cn/fund",
+            description: "获取正式单位净值、真实净值日期及最近 400 天历史净值",
+          },
+        ],
         ending: "；根据净值计算区间收益率。",
       },
     ],

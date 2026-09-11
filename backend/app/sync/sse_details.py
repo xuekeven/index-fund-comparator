@@ -1,5 +1,6 @@
 import argparse
 import calendar
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -7,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -39,15 +40,23 @@ from app.sync.sse_funds import (
 
 SSE_SNAPSHOT_URL = "https://yunhq.sse.com.cn:32042/v1/sh1/snap"
 SSE_DAYK_URL = "https://yunhq.sse.com.cn:32042/v1/sh1/dayk"
-SSE_HISTORY_BEGIN = -320
-SSE_HISTORY_END = -1
-SSE_HISTORY_SELECT = "date,iopv,prevClose"
+EID_NAV_URL = "http://eid.csrc.gov.cn/fund/disclose/getPublicFundJZInfoMore.do"
+EID_NAV_BACKFILL_DAYS = 400
+EID_NAV_PAGE_SIZE = 500
 SSE_SNAPSHOT_SELECT = (
     "name,last,chg_rate,change,open,prev_close,high,low,volume,amount,"
     "tradephase,cpxxextendname,iopv,fp_volume,fp_amount,fp_phase,cpxxsubtype"
 )
 TARGET_FAMILY_IDS = tuple(target.family_id for target in TARGETS)
-RETURN_CALCULATION_VERSION = "sse-iopv-simple-return-v1"
+RETURN_CALCULATION_VERSION = "sse-eid-official-nav-simple-return-v1"
+RETURN_METRIC_CODES = (
+    "return_1m",
+    "return_3m",
+    "return_6m",
+    "return_ytd",
+    "return_1y",
+)
+SSE_DETAIL_URL_PREFIX = "https://etf.sse.com.cn/fundlist/funddetail/index.shtml"
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +72,7 @@ class SseSnapshot:
     code: str
     trade_date: date
     close_price: Decimal
-    nav: Decimal
+    iopv: Decimal
     open_price: Decimal | None
     high_price: Decimal | None
     low_price: Decimal | None
@@ -127,14 +136,14 @@ def parse_sse_snapshot(payload: dict[str, Any]) -> SseSnapshot:
         raise RuntimeError(f"Invalid SSE snapshot date: {raw_date!r}") from exc
 
     close_price = decimal_or_none(values[1])
-    nav = decimal_or_none(values[12])
-    if close_price is None or close_price < 0 or nav is None or nav <= 0:
-        raise RuntimeError(f"SSE snapshot lacked close price or NAV for {code}")
+    iopv = decimal_or_none(values[12])
+    if close_price is None or close_price < 0 or iopv is None or iopv <= 0:
+        raise RuntimeError(f"SSE snapshot lacked close price or IOPV for {code}")
     return SseSnapshot(
         code=code,
         trade_date=trade_date,
         close_price=close_price,
-        nav=nav,
+        iopv=iopv,
         open_price=decimal_or_none(values[4]),
         high_price=decimal_or_none(values[6]),
         low_price=decimal_or_none(values[7]),
@@ -168,6 +177,66 @@ def parse_sse_nav_history(payload: dict[str, Any]) -> list[SseNavRecord]:
             )
         )
     return records
+
+
+def eid_nav_query_data(ticker: str, start_date: date, end_date: date) -> str:
+    data = [
+        {"name": "sEcho", "value": 1},
+        {"name": "iColumns", "value": 5},
+        {"name": "sColumns", "value": ""},
+        {"name": "iDisplayStart", "value": 0},
+        {"name": "iDisplayLength", "value": EID_NAV_PAGE_SIZE},
+        {"name": "fundType", "value": "all"},
+        {"name": "fundCompanyShortName", "value": ""},
+        {"name": "fundCode", "value": ticker},
+        {"name": "fundName", "value": ""},
+        {"name": "startDate", "value": start_date.isoformat()},
+        {"name": "endDate", "value": end_date.isoformat()},
+    ]
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_eid_nav_report(payload: Any, ticker: str) -> list[SseNavRecord]:
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"EID NAV report returned an unexpected payload for {ticker}")
+    records: dict[date, SseNavRecord] = {}
+    for row in payload.get("aaData") or []:
+        if str(row.get("code") or "").strip() != ticker:
+            continue
+        try:
+            nav_date = date.fromisoformat(str(row.get("valuationDate") or "").strip())
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid EID NAV date for {ticker}") from exc
+        unit_nav = decimal_or_none(row.get("shareNetValue"))
+        if unit_nav is None or unit_nav <= 0:
+            raise RuntimeError(f"Invalid EID NAV value for {ticker} on {nav_date}")
+        records[nav_date] = SseNavRecord(ticker, nav_date, unit_nav)
+    if not records:
+        raise RuntimeError(f"EID NAV report did not contain valid rows for {ticker}")
+    return [records[item] for item in sorted(records)]
+
+
+def fetch_eid_nav_records(
+    client: httpx.Client, ticker: str, end_date: date
+) -> tuple[list[SseNavRecord], str]:
+    payload: dict[str, Any] = {}
+    for attempt in range(3):
+        response = client.get(
+            EID_NAV_URL,
+            params={
+                "aoData": eid_nav_query_data(
+                    ticker, end_date - timedelta(days=EID_NAV_BACKFILL_DAYS), end_date
+                )
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        message = str(payload.get("message") or "")
+        if payload.get("success") is not False:
+            break
+        if "请求繁忙" not in message or attempt == 2:
+            raise RuntimeError(message or "EID NAV query failed")
+    return parse_eid_nav_report(payload, ticker), EID_NAV_URL
 
 
 def subtract_months(value: date, months: int) -> date:
@@ -239,35 +308,30 @@ def fetch_snapshot(
     return parse_sse_snapshot(response.json())
 
 
-def fetch_nav_history(
-    client: httpx.Client, code: str, detail_url: str
-) -> tuple[list[SseNavRecord], str]:
-    response = client.get(
-        f"{SSE_DAYK_URL}/{code}",
-        params={
-            "begin": SSE_HISTORY_BEGIN,
-            "end": SSE_HISTORY_END,
-            "period": "day",
-            "select": SSE_HISTORY_SELECT,
-        },
-        headers={"Referer": detail_url},
+def is_legacy_iopv_nav_source(source_url: str | None) -> bool:
+    value = source_url or ""
+    return value.startswith(f"{SSE_DAYK_URL}/") or value.startswith(SSE_DETAIL_URL_PREFIX)
+
+
+def delete_legacy_iopv_nav(session: Session, share_id: int) -> int:
+    rows = list(
+        session.scalars(
+            select(NavDaily).where(NavDaily.fund_share_class_id == share_id)
+        )
     )
-    response.raise_for_status()
-    records = parse_sse_nav_history(response.json())
-    if any(record.code != code for record in records):
-        raise RuntimeError(f"SSE NAV history code mismatch for {code}")
-    return records, str(response.request.url)
+    legacy_rows = [row for row in rows if is_legacy_iopv_nav_source(row.source_url)]
+    for row in legacy_rows:
+        session.delete(row)
+    if legacy_rows:
+        session.flush()
+    return len(legacy_rows)
 
 
-def needs_nav_history_backfill(session: Session, share_id: int) -> bool:
-    return not bool(
-        session.scalar(
-            select(NavDaily.id)
-            .where(
-                NavDaily.fund_share_class_id == share_id,
-                NavDaily.source_url.like(f"{SSE_DAYK_URL}/%"),
-            )
-            .limit(1)
+def delete_return_metrics(session: Session, share_id: int) -> None:
+    session.execute(
+        delete(CalculatedMetric).where(
+            CalculatedMetric.fund_share_class_id == share_id,
+            CalculatedMetric.metric_code.in_(RETURN_METRIC_CODES),
         )
     )
 
@@ -340,7 +404,7 @@ def sync_quote(
         "close_price": snapshot.close_price,
         "volume": snapshot.volume,
         "turnover_amount": snapshot.turnover_amount,
-        "iopv": snapshot.nav,
+        "iopv": snapshot.iopv,
         "source_url": source_url,
         "source_time": business_time,
         "effective_from": business_time,
@@ -463,40 +527,28 @@ def run_sync(*, dry_run: bool = False) -> tuple[int, list[date]]:
                     raise RuntimeError(
                         f"SSE detail code mismatch: {listing.ticker} != {snapshot.code}"
                     )
-                metric_source_url = detail_url
-                history: list[SseNavRecord] = []
-                if needs_nav_history_backfill(session, share_id):
-                    history, metric_source_url = fetch_nav_history(
-                        client, listing.ticker, detail_url
-                    )
+                official_nav_records, nav_source_url = fetch_eid_nav_records(
+                    client, listing.ticker, snapshot.trade_date
+                )
 
                 with session.begin_nested():
-                    sync_nav_daily(
-                        session,
-                        share_id,
-                        SseNavRecord(
-                            code=snapshot.code,
-                            nav_date=snapshot.trade_date,
-                            unit_nav=snapshot.nav,
-                        ),
-                        collected_at,
-                        detail_url,
-                    )
-                    for record in history:
+                    for record in official_nav_records:
                         sync_nav_daily(
                             session,
                             share_id,
                             record,
                             collected_at,
-                            metric_source_url,
+                            nav_source_url,
                         )
+                    delete_legacy_iopv_nav(session, share_id)
+                    delete_return_metrics(session, share_id)
                     sync_return_metrics(
                         session,
                         share_id,
                         index_definition_id,
                         calculate_return_metrics(load_nav_records(session, share_id)),
                         collected_at,
-                        metric_source_url,
+                        nav_source_url,
                     )
                     sync_quote(
                         session,

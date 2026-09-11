@@ -208,12 +208,14 @@ class UserFundTag(Base, TimestampMixin):
         BigInteger, ForeignKey("fund_share_class.id", ondelete="CASCADE"), nullable=False
     )
     tag_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
             "tag_type IN ('favorite', 'holding', 'recurring')",
             name="ck_user_fund_tag_type",
         ),
+        CheckConstraint("amount IS NULL OR amount >= 0", name="ck_user_fund_tag_amount"),
         UniqueConstraint(
             "user_id",
             "fund_share_class_id",
@@ -292,6 +294,32 @@ class KnowledgeArticle(Base, TimestampMixin):
             "user_id",
             "category_order",
             "article_order",
+        ),
+    )
+
+
+class ContentOption(Base, TimestampMixin):
+    __tablename__ = "content_option"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    option_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    value: Mapped[str] = mapped_column(String(200), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "option_type IN ('investment_note_source', 'knowledge_category')",
+            name="ck_content_option_type",
+        ),
+        UniqueConstraint(
+            "user_id", "option_type", "value", name="uq_content_option_identity"
+        ),
+        Index(
+            "ix_content_option_user_type_order",
+            "user_id",
+            "option_type",
+            "sort_order",
         ),
     )
 

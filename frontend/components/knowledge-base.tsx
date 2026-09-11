@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, FormEvent } from "react";
 
 import {
   createKnowledgeArticle,
   deleteKnowledgeArticle,
+  getContentOptions,
   getKnowledgeArticles,
   reorderKnowledgeArticles,
+  updateContentOptions,
   updateKnowledgeArticle,
 } from "@/lib/api";
 import type {
@@ -16,10 +18,25 @@ import type {
   KnowledgeCategoryOrder,
   KnowledgeSource,
 } from "@/lib/types";
-import { CloseIcon, SearchIcon } from "./icons";
+import { ContentOptionDialog } from "./content-option-dialog";
+import { ArrowUpIcon, CloseIcon, SearchIcon, SettingsIcon } from "./icons";
 import { NoteSelect } from "./investment-notes";
+import { MarkdownRenderer } from "./markdown-renderer";
+import { MarkdownToc } from "./markdown-toc";
 
 const DEFAULT_CATEGORIES = ["资产配置", "利率", "债券", "黄金", "红利策略", "交易工具"];
+const ARTICLE_HASH_PATTERN = /^#knowledge\/article\/(\d+)$/;
+
+function articleIdFromUrl() {
+  const match = window.location.hash.match(ARTICLE_HASH_PATTERN);
+  if (!match) return null;
+  const articleId = Number(match[1]);
+  return Number.isSafeInteger(articleId) ? articleId : null;
+}
+
+function articleHash(articleId: number) {
+  return `#knowledge/article/${articleId}`;
+}
 
 type DragItem =
   | { type: "category"; category: string }
@@ -31,10 +48,10 @@ type DropTarget =
   | null;
 type ArticleDraft = KnowledgeArticlePayload;
 
-function emptyDraft(): ArticleDraft {
+function emptyDraft(categoryOptions: string[] = DEFAULT_CATEGORIES): ArticleDraft {
   return {
     title: "",
-    category: DEFAULT_CATEGORIES[0],
+    category: categoryOptions[0] ?? "",
     summary: "",
     contentMarkdown: "",
     tags: [],
@@ -47,7 +64,7 @@ function toDraft(article: KnowledgeArticle): ArticleDraft {
   return {
     title: article.title,
     category: article.category,
-    summary: article.summary,
+    summary: "",
     contentMarkdown: article.contentMarkdown,
     tags: article.tags,
     sources: article.sources.length > 0
@@ -78,61 +95,53 @@ function orderGroups(items: KnowledgeArticle[]): KnowledgeCategoryOrder[] {
   return Array.from(groups, ([category, articleIds]) => ({ category, articleIds }));
 }
 
-function MarkdownText({ text }: { text: string }) {
-  const lines = text.trim().split(/\r?\n/);
-  if (!text.trim()) {
-    return <p className="knowledge-empty-copy">暂未填写正文。</p>;
-  }
-  return (
-    <div className="knowledge-markdown">
-      {lines.map((line, index) => {
-        const content = line.trim();
-        const key = String(index) + "-" + content;
-        if (!content) {
-          return <span className="knowledge-markdown-break" aria-hidden="true" key={key} />;
-        }
-        const heading = content.match(/^(#{1,3})\s+(.+)$/);
-        if (heading) {
-          const level = heading[1].length;
-          if (level === 1) return <h3 key={key}>{heading[2]}</h3>;
-          if (level === 2) return <h4 key={key}>{heading[2]}</h4>;
-          return <h5 key={key}>{heading[2]}</h5>;
-        }
-        if (/^[-*]\s+/.test(content)) {
-          return <p className="knowledge-bullet" key={key}>{content.slice(2)}</p>;
-        }
-        if (/^\d+[.)]\s+/.test(content)) {
-          return <p className="knowledge-numbered" key={key}>{content}</p>;
-        }
-        if (content.startsWith("> ")) {
-          return <blockquote key={key}>{content.slice(2)}</blockquote>;
-        }
-        return <p key={key}>{content}</p>;
-      })}
-    </div>
-  );
-}
-
 export function KnowledgeBase() {
   const [articles, setArticles] = useState<KnowledgeArticle[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<KnowledgeArticle | "new" | null>(null);
+  const [inlineBodyDraft, setInlineBodyDraft] = useState<{
+    articleId: number;
+    content: string;
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<KnowledgeArticle | null>(null);
+  const [managingCategories, setManagingCategories] = useState(false);
   const [draft, setDraft] = useState<ArticleDraft>(emptyDraft);
   const [openSelect, setOpenSelect] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const [categoryOptions, setCategoryOptions] = useState<string[]>(DEFAULT_CATEGORIES);
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
   const [reordering, setReordering] = useState(false);
   const [dragItem, setDragItem] = useState<DragItem | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
   const [error, setError] = useState<string | null>(null);
+  const readerRef = useRef<HTMLElement>(null);
+  const inlineBodyInputRef = useRef<HTMLTextAreaElement>(null);
+  const inlineBodyScrollRatioRef = useRef(0);
+  const restoreReaderScrollRef = useRef(false);
+  const deleteConfirmRef = useRef<HTMLButtonElement>(null);
+  const inlineBodyArticleId = inlineBodyDraft?.articleId ?? null;
 
   useEffect(() => {
     const controller = new AbortController();
-    getKnowledgeArticles(controller.signal)
-      .then((items) => {
+    Promise.all([
+      getKnowledgeArticles(controller.signal),
+      getContentOptions("knowledge_category", controller.signal),
+    ])
+      .then(([items, optionResponse]) => {
+        const requestedArticleId = articleIdFromUrl();
+        const initialArticle = items.find((article) => article.id === requestedArticleId)
+          ?? items[0]
+          ?? null;
+        setCategoryOptions(optionResponse.values);
         setArticles(items);
-        setActiveId(items[0]?.id ?? null);
+        setActiveId(initialArticle?.id ?? null);
+        setExpandedCategories(new Set(initialArticle ? [initialArticle.category] : []));
+        if (initialArticle && requestedArticleId !== initialArticle.id) {
+          window.history.replaceState(null, "", articleHash(initialArticle.id));
+        }
       })
       .catch((reason) => {
         if (!(reason instanceof DOMException && reason.name === "AbortError")) {
@@ -145,13 +154,78 @@ export function KnowledgeBase() {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    function selectArticleFromUrl() {
+      const requestedArticleId = articleIdFromUrl();
+      if (requestedArticleId === null) return;
+      const article = articles.find((item) => item.id === requestedArticleId);
+      if (!article) return;
+      setActiveId(article.id);
+      setInlineBodyDraft(null);
+      setExpandedCategories((current) => {
+        const next = new Set(current);
+        next.add(article.category);
+        return next;
+      });
+    }
+    window.addEventListener("hashchange", selectArticleFromUrl);
+    return () => window.removeEventListener("hashchange", selectArticleFromUrl);
+  }, [articles]);
+
+  useEffect(() => {
+    if (editing === null) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [editing]);
+
+  useEffect(() => {
+    if (deleteTarget === null) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving) setDeleteTarget(null);
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    deleteConfirmRef.current?.focus();
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [deleteTarget, saving]);
+
+  useEffect(() => {
+    let frame: number | null = null;
+    if (inlineBodyArticleId !== null) {
+      frame = window.requestAnimationFrame(() => {
+        const input = inlineBodyInputRef.current;
+        if (!input) return;
+        const maxScrollTop = Math.max(0, input.scrollHeight - input.clientHeight);
+        input.scrollTop = inlineBodyScrollRatioRef.current * maxScrollTop;
+      });
+    } else if (restoreReaderScrollRef.current) {
+      restoreReaderScrollRef.current = false;
+      frame = window.requestAnimationFrame(() => {
+        const reader = readerRef.current;
+        if (!reader) return;
+        const maxScrollTop = Math.max(0, reader.scrollHeight - reader.clientHeight);
+        reader.scrollTop = inlineBodyScrollRatioRef.current * maxScrollTop;
+      });
+    }
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [inlineBodyArticleId]);
+
   const catalogCategories = useMemo(
     () => Array.from(new Set(articles.map((article) => article.category))),
     [articles],
   );
   const categories = useMemo(
-    () => Array.from(new Set([...catalogCategories, ...DEFAULT_CATEGORIES])),
-    [catalogCategories],
+    () => Array.from(new Set([...(draft.category ? [draft.category] : []), ...categoryOptions])),
+    [categoryOptions, draft.category],
   );
   const filteredArticles = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -163,7 +237,6 @@ export function KnowledgeBase() {
       return [
         article.title,
         article.category,
-        article.summary,
         article.contentMarkdown,
         article.tags.join(" "),
         sourceText,
@@ -184,15 +257,36 @@ export function KnowledgeBase() {
     filteredArticles.find((article) => article.id === activeId)
     ?? filteredArticles[0]
     ?? null;
+  const activeArticleId = activeArticle?.id ?? null;
+
+  useEffect(() => {
+    inlineBodyScrollRatioRef.current = 0;
+    restoreReaderScrollRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      readerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeArticleId]);
+
+  function toggleCategory(category: string) {
+    setExpandedCategories((current) => {
+      const next = new Set(current);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  }
 
   function startNew() {
+    setInlineBodyDraft(null);
     setEditing("new");
-    setDraft(emptyDraft());
+    setDraft(emptyDraft(categoryOptions));
     setOpenSelect(null);
     setError(null);
   }
 
   function startEdit(article: KnowledgeArticle) {
+    setInlineBodyDraft(null);
     setEditing(article);
     setDraft(toDraft(article));
     setOpenSelect(null);
@@ -205,6 +299,17 @@ export function KnowledgeBase() {
       setOpenSelect(null);
       setError(null);
     }
+  }
+
+  function rememberInlineBodyPosition() {
+    const input = inlineBodyInputRef.current;
+    const maxScrollTop = input
+      ? Math.max(0, input.scrollHeight - input.clientHeight)
+      : 0;
+    inlineBodyScrollRatioRef.current = input && maxScrollTop > 0
+      ? input.scrollTop / maxScrollTop
+      : 0;
+    restoreReaderScrollRef.current = true;
   }
 
   function updateSource(index: number, field: keyof KnowledgeSource, value: string) {
@@ -230,7 +335,7 @@ export function KnowledgeBase() {
       ...draft,
       title: draft.title.trim(),
       category: draft.category.trim(),
-      summary: draft.summary.trim(),
+      summary: "",
       contentMarkdown: draft.contentMarkdown.trim(),
       sources: draft.sources
         .filter((source) => source.name.trim())
@@ -249,6 +354,16 @@ export function KnowledgeBase() {
           : current.map((article) => article.id === saved.id ? saved : article)
       ));
       setActiveId(saved.id);
+      if (currentEditing === "new") {
+        window.history.pushState(null, "", articleHash(saved.id));
+      } else {
+        window.history.replaceState(null, "", articleHash(saved.id));
+      }
+      setExpandedCategories((current) => {
+        const next = new Set(current);
+        next.add(saved.category);
+        return next;
+      });
       setEditing(null);
       setOpenSelect(null);
     } catch (reason) {
@@ -259,15 +374,50 @@ export function KnowledgeBase() {
   }
 
   async function removeArticle(article: KnowledgeArticle) {
-    if (!window.confirm("确定删除“" + article.title + "”吗？")) return;
     setSaving(true);
     setError(null);
     try {
       await deleteKnowledgeArticle(article.id);
-      setArticles((current) => current.filter((item) => item.id !== article.id));
-      setActiveId(null);
+      const articleIndex = articles.findIndex((item) => item.id === article.id);
+      const remainingArticles = articles.filter((item) => item.id !== article.id);
+      const nextArticle = remainingArticles[Math.min(articleIndex, remainingArticles.length - 1)] ?? null;
+      setArticles(remainingArticles);
+      setActiveId(nextArticle?.id ?? null);
+      window.history.replaceState(
+        null,
+        "",
+        nextArticle ? articleHash(nextArticle.id) : "#knowledge",
+      );
+      setInlineBodyDraft(null);
+      setDeleteTarget(null);
     } catch {
       setError("删除失败，请稍后重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveInlineBody(article: KnowledgeArticle) {
+    if (inlineBodyDraft?.articleId !== article.id) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await updateKnowledgeArticle(article.id, {
+        title: article.title,
+        category: article.category,
+        summary: "",
+        contentMarkdown: inlineBodyDraft.content.trim(),
+        tags: article.tags,
+        sources: article.sources,
+        reviewedAt: article.reviewedAt,
+      });
+      setArticles((current) => current.map((item) => (
+        item.id === saved.id ? saved : item
+      )));
+      rememberInlineBodyPosition();
+      setInlineBodyDraft(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "正文保存失败，请重试。");
     } finally {
       setSaving(false);
     }
@@ -385,9 +535,14 @@ export function KnowledgeBase() {
             <span className="section-kicker">长期有效的基础知识</span>
             <h1 id="knowledge-title">投资手册</h1>
           </div>
-          <button className="knowledge-new-button" type="button" onClick={startNew}>
-            ＋ 新建文章
-          </button>
+          <div className="knowledge-heading-actions">
+            <button className="knowledge-new-button" type="button" onClick={startNew}>
+              ＋ 新建文章
+            </button>
+            <button className="content-options-button" type="button" onClick={() => setManagingCategories(true)} aria-label="管理投资手册" title="管理投资手册">
+              <SettingsIcon />
+            </button>
+          </div>
         </header>
 
         <div className="knowledge-toolbar">
@@ -445,7 +600,17 @@ export function KnowledgeBase() {
                       }
                     }}
                   >
-                    <h2>{category}</h2>
+                    <h2>
+                      <button
+                        className="knowledge-category-toggle"
+                        type="button"
+                        aria-expanded={query.trim() !== "" || expandedCategories.has(category)}
+                        onClick={() => toggleCategory(category)}
+                      >
+                        <span className="knowledge-category-chevron" aria-hidden="true">{query.trim() !== "" || expandedCategories.has(category) ? "−" : "+"}</span>
+                        <span>{category}</span>
+                      </button>
+                    </h2>
                     <button
                       className="knowledge-drag-handle"
                       type="button"
@@ -459,7 +624,7 @@ export function KnowledgeBase() {
                       <span aria-hidden="true">⠿</span>
                     </button>
                   </div>
-                  {items.map((article) => (
+                  {(query.trim() !== "" || expandedCategories.has(category)) && items.map((article) => (
                     <div
                       key={article.id}
                       className={[
@@ -488,7 +653,18 @@ export function KnowledgeBase() {
                       <button
                         className="knowledge-article-select"
                         type="button"
-                        onClick={() => setActiveId(article.id)}
+                        onClick={() => {
+                          setActiveId(article.id);
+                          if (window.location.hash !== articleHash(article.id)) {
+                            window.history.pushState(null, "", articleHash(article.id));
+                          }
+                          setInlineBodyDraft(null);
+                          setExpandedCategories((current) => {
+                            const next = new Set(current);
+                            next.add(category);
+                            return next;
+                          });
+                        }}
                       >
                         <strong>{article.title}</strong>
                       </button>
@@ -517,10 +693,12 @@ export function KnowledgeBase() {
             </div>
           </aside>
 
-          <article className="knowledge-reader">
-            {error && editing === null && (
-              <p className="knowledge-error" role="alert">{error}</p>
-            )}
+          <div className="knowledge-reader-shell">
+          <article
+            ref={readerRef}
+            className="knowledge-reader"
+            onScroll={(event) => setShowScrollTop(event.currentTarget.scrollTop > 160)}
+          >
             {loading ? (
               <div className="knowledge-empty-state">
                 <span className="spinner" />
@@ -529,55 +707,142 @@ export function KnowledgeBase() {
             ) : activeArticle ? (
               <>
                 <header className="knowledge-reader-head">
-                  <div>
-                    <div className="knowledge-meta-line">
-                      <span>{activeArticle.category}</span>
-                    </div>
-                    <h2>{activeArticle.title}</h2>
-                    {activeArticle.summary && <p>{activeArticle.summary}</p>}
-                  </div>
+                  <h2>{activeArticle.title}</h2>
                   <div className="knowledge-reader-actions">
-                    <button type="button" onClick={() => startEdit(activeArticle)}>编辑</button>
                     <button
-                      className="danger"
+                      className={inlineBodyDraft?.articleId === activeArticle.id ? "primary" : ""}
                       type="button"
                       disabled={saving}
-                      onClick={() => void removeArticle(activeArticle)}
+                      onClick={() => {
+                        if (inlineBodyDraft?.articleId === activeArticle.id) {
+                          void saveInlineBody(activeArticle);
+                        } else {
+                          const reader = readerRef.current;
+                          const maxScrollTop = reader
+                            ? Math.max(0, reader.scrollHeight - reader.clientHeight)
+                            : 0;
+                          inlineBodyScrollRatioRef.current = reader && maxScrollTop > 0
+                            ? reader.scrollTop / maxScrollTop
+                            : 0;
+                          setInlineBodyDraft({
+                            articleId: activeArticle.id,
+                            content: activeArticle.contentMarkdown,
+                          });
+                          setError(null);
+                        }
+                      }}
                     >
-                      删除
+                      {inlineBodyDraft?.articleId === activeArticle.id
+                        ? saving ? "保存中…" : "保存正文"
+                        : "编辑正文"}
                     </button>
+                    {inlineBodyDraft?.articleId === activeArticle.id && (
+                      <button
+                        className="cancel"
+                        type="button"
+                        disabled={saving}
+                        onClick={() => {
+                          rememberInlineBodyPosition();
+                          setInlineBodyDraft(null);
+                        }}
+                      >
+                        取消保存
+                      </button>
+                    )}
+                    {inlineBodyDraft?.articleId !== activeArticle.id && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => startEdit(activeArticle)}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="danger"
+                          type="button"
+                          disabled={saving}
+                          onClick={() => {
+                            setError(null);
+                            setDeleteTarget(activeArticle);
+                          }}
+                        >
+                          删除
+                        </button>
+                      </>
+                    )}
                   </div>
                 </header>
-                {activeArticle.tags.length > 0 && (
-                  <div className="knowledge-tags">
-                    {activeArticle.tags.map((tag) => <span key={tag}>#{tag}</span>)}
-                  </div>
+                {error && editing === null && (
+                  <p className="knowledge-error knowledge-reader-error" role="alert">{error}</p>
                 )}
-                <div className="knowledge-body-card">
-                  <MarkdownText text={activeArticle.contentMarkdown} />
-                </div>
-                {activeArticle.sources.length > 0 && (
-                  <section className="knowledge-sources">
-                    <h3>参考资料</h3>
-                    {activeArticle.sources.map((source) => (
-                      <div key={source.name + "-" + (source.url ?? "")}>
-                        <span>{source.name}</span>
-                        {source.url && (
-                          <a href={source.url} target="_blank" rel="noreferrer">打开来源 ↗</a>
-                        )}
+                {inlineBodyDraft?.articleId === activeArticle.id ? (
+                  <div className="knowledge-inline-editor">
+                    <textarea
+                      ref={inlineBodyInputRef}
+                      autoFocus
+                      aria-label="Markdown 正文源码"
+                      value={inlineBodyDraft.content}
+                      onChange={(event) => setInlineBodyDraft({
+                        articleId: activeArticle.id,
+                        content: event.target.value,
+                      })}
+                    />
+                  </div>
+                ) : (
+                  <div className="knowledge-reader-grid">
+                    <div className="knowledge-reader-main">
+                      {activeArticle.tags.length > 0 && (
+                        <div className="knowledge-tags">
+                          {activeArticle.tags.map((tag) => <span key={tag}>#{tag}</span>)}
+                        </div>
+                      )}
+                      <div className="knowledge-body-card">
+                        <MarkdownRenderer content={activeArticle.contentMarkdown} emptyText="暂未填写正文。" />
                       </div>
-                    ))}
-                  </section>
+                      {activeArticle.sources.length > 0 && (
+                        <section className="knowledge-sources">
+                          <h3>参考资料</h3>
+                          {activeArticle.sources.map((source) => (
+                            <div key={source.name + "-" + (source.url ?? "")}>
+                              <span>{source.name}</span>
+                              {source.url && (
+                                <a href={source.url} target="_blank" rel="noreferrer">打开来源 ↗</a>
+                              )}
+                            </div>
+                          ))}
+                        </section>
+                      )}
+                    </div>
+                    <MarkdownToc key={activeArticle.id} content={activeArticle.contentMarkdown} />
+                  </div>
                 )}
               </>
             ) : (
-              <div className="knowledge-empty-state">
-                <strong>建立你的第一篇基础知识</strong>
-                <p>把利率、黄金、债券和资产配置中的稳定结论整理成可复用的文章。</p>
-                <button type="button" onClick={startNew}>新建第一篇文章</button>
-              </div>
+              <>
+                {error && editing === null && (
+                  <p className="knowledge-error" role="alert">{error}</p>
+                )}
+                <div className="knowledge-empty-state">
+                  <strong>建立你的第一篇基础知识</strong>
+                  <p>把利率、黄金、债券和资产配置中的稳定结论整理成可复用的文章。</p>
+                  <button type="button" onClick={startNew}>新建第一篇文章</button>
+                </div>
+              </>
             )}
           </article>
+          {inlineBodyArticleId === null && (
+            <button
+              className={`knowledge-scroll-top${showScrollTop ? " visible" : ""}`}
+              type="button"
+              aria-label="滚动到顶部"
+              title="滚动到顶部"
+              onClick={() => readerRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
+            >
+              <ArrowUpIcon />
+            </button>
+          )}
+          </div>
         </div>
       </section>
 
@@ -650,15 +915,6 @@ export function KnowledgeBase() {
                 </label>
               </div>
               <label className="knowledge-form-field">
-                <span>摘要</span>
-                <textarea
-                  rows={2}
-                  value={draft.summary}
-                  onChange={(event) => setDraft({ ...draft, summary: event.target.value })}
-                  placeholder="用一两句话说明这篇文章解决什么问题"
-                />
-              </label>
-              <label className="knowledge-form-field">
                 <span>正文（Markdown）</span>
                 <textarea
                   className="knowledge-content-input"
@@ -675,22 +931,10 @@ export function KnowledgeBase() {
               <div className="knowledge-form-field">
                 <div className="knowledge-field-heading">
                   <span>参考资料</span>
-                  <button
-                    className="knowledge-add-source"
-                    type="button"
-                    aria-label="添加资料"
-                    title="添加资料"
-                    onClick={() => setDraft((current) => ({
-                      ...current,
-                      sources: [...current.sources, { name: "", url: null }],
-                    }))}
-                  >
-                    ＋
-                  </button>
                 </div>
                 <div className="knowledge-source-editor">
                   {draft.sources.map((source, index) => (
-                    <div className={`knowledge-source-row ${draft.sources.length === 1 ? "single" : ""}`} key={String(index)}>
+                    <div className="knowledge-source-row" key={String(index)}>
                       <input
                         value={source.name}
                         onChange={(event) => updateSource(index, "name", event.target.value)}
@@ -701,20 +945,37 @@ export function KnowledgeBase() {
                         onChange={(event) => updateSource(index, "url", event.target.value)}
                         placeholder="https://…"
                       />
-                      {draft.sources.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => setDraft((current) => ({
-                            ...current,
-                            sources: current.sources.filter(
-                              (_, sourceIndex) => sourceIndex !== index,
-                            ),
-                          }))}
-                          aria-label="删除资料"
-                        >
-                          ×
-                        </button>
-                      )}
+                      <div className="knowledge-source-actions">
+                        {draft.sources.length > 1 && (
+                          <button
+                            className="knowledge-remove-source"
+                            type="button"
+                            onClick={() => setDraft((current) => ({
+                              ...current,
+                              sources: current.sources.filter(
+                                (_, sourceIndex) => sourceIndex !== index,
+                              ),
+                            }))}
+                            aria-label="删除资料"
+                          >
+                            ×
+                          </button>
+                        )}
+                        {index === draft.sources.length - 1 && (
+                          <button
+                            className="knowledge-add-source"
+                            type="button"
+                            aria-label="添加资料"
+                            title="添加资料"
+                            onClick={() => setDraft((current) => ({
+                              ...current,
+                              sources: [...current.sources, { name: "", url: null }],
+                            }))}
+                          >
+                            ＋
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -727,6 +988,54 @@ export function KnowledgeBase() {
               </footer>
             </form>
           </div>
+        </div>
+      )}
+
+      {managingCategories && (
+        <ContentOptionDialog
+          pageTitle="投资手册"
+          itemLabel="分类"
+          values={categoryOptions}
+          onClose={() => setManagingCategories(false)}
+          onSave={async (values) => {
+            const response = await updateContentOptions("knowledge_category", values);
+            setCategoryOptions(response.values);
+          }}
+        />
+      )}
+
+      {deleteTarget !== null && (
+        <div className="note-delete-overlay" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !saving) setDeleteTarget(null);
+        }}>
+          <section
+            className="note-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="knowledge-delete-title"
+            aria-describedby="knowledge-delete-description"
+          >
+            <span className="section-kicker">删除文章</span>
+            <h2 id="knowledge-delete-title">确认删除？</h2>
+            <p id="knowledge-delete-description">
+              确认删除“{deleteTarget.title}”吗？删除后无法恢复。
+            </p>
+            {error && <p className="note-delete-error" role="alert">{error}</p>}
+            <div className="note-delete-actions">
+              <button type="button" disabled={saving} onClick={() => setDeleteTarget(null)}>
+                取消
+              </button>
+              <button
+                ref={deleteConfirmRef}
+                className="danger"
+                type="button"
+                disabled={saving}
+                onClick={() => void removeArticle(deleteTarget)}
+              >
+                {saving ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </main>

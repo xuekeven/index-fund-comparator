@@ -12,6 +12,10 @@ import {
   VENUES,
 } from "./fund-list.ts";
 import type { FundComparisonRow } from "./types.ts";
+import {
+  calculateRecurringInvestmentTotals,
+  formatFundTagLabel,
+} from "./fund-tag-values.ts";
 
 function fund(overrides: Partial<FundComparisonRow>): FundComparisonRow {
   return {
@@ -50,6 +54,8 @@ function fund(overrides: Partial<FundComparisonRow>): FundComparisonRow {
     sourceTime: null,
     note: null,
     tags: [],
+    holdingAmount: null,
+    recurringAmount: null,
     ...overrides,
   };
 }
@@ -336,6 +342,27 @@ test("sorts numeric values while keeping missing values last", () => {
     sortFundRows(rows, "expenseRate", "desc").map((item) => item.code),
     ["2", "1", "3"],
   );
+});
+
+test("formats holding and recurring values while preserving explicit zero", () => {
+  const cnyFund = fund({ holdingAmount: 0, recurringAmount: 0 });
+  const usdFund = fund({
+    id: "share-usd",
+    code: "017643",
+    currency: "美元",
+    recurringAmount: 3,
+  });
+
+  assert.equal(formatFundTagLabel(cnyFund, "holding"), "持有0份额");
+  assert.equal(formatFundTagLabel(cnyFund, "recurring"), "定投0人民币");
+  assert.equal(formatFundTagLabel(usdFund, "recurring"), "定投3美元");
+  assert.equal(formatFundTagLabel(fund({}), "holding"), "持有");
+  assert.deepEqual(calculateRecurringInvestmentTotals([cnyFund, usdFund]), {
+    cny: 0,
+    usd: 3,
+    hasCny: true,
+    hasUsd: true,
+  });
 });
 
 test("sorts fund shares by display name in both directions", () => {

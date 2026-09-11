@@ -23,6 +23,7 @@ HUAAN_FUND_URL = "https://www.huaan.com.cn/funds/{code}/"
 HUAAN_NAV_URL = "https://www.huaan.com.cn/funddetail/selectFundayByCode.do"
 CIFM_FUND_URL = "https://www.cifm.com/fund/{code}/"
 CIFM_NAV_URL = "https://www.cifm.com/images/year/net_value_his365.xml"
+CIFM_DOWNLOAD_ATTEMPTS = 4
 CHINA_UNIVERSAL_FUND_URL = (
     "https://www.99fund.com/main/products/pofund/{code}/fundnav.shtml"
 )
@@ -276,6 +277,27 @@ def _deduplicate(
     return [by_date[key] for key in sorted(by_date)]
 
 
+def _content_length(response: httpx.Response) -> int | None:
+    raw_length = response.headers.get("content-length")
+    if raw_length is None:
+        return None
+    try:
+        return int(raw_length)
+    except ValueError as exc:
+        raise RuntimeError("CIFM NAV response had invalid Content-Length") from exc
+
+
+def _content_range(response: httpx.Response) -> tuple[int, int]:
+    raw_range = response.headers.get("content-range", "")
+    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", raw_range)
+    if match is None:
+        raise RuntimeError("CIFM NAV resume response had invalid Content-Range")
+    range_start, range_end, range_total = map(int, match.groups())
+    if range_end < range_start or range_end >= range_total:
+        raise RuntimeError("CIFM NAV resume response had invalid Content-Range")
+    return range_start, range_total
+
+
 class OfficialCompanyNavFetcher:
     def __init__(self, client: httpx.Client) -> None:
         self.client = client
@@ -451,10 +473,96 @@ class OfficialCompanyNavFetcher:
 
     def _fetch_cifm(self, code: str) -> list[OfficialNavRecord]:
         if CIFM_NAV_URL not in self._content_cache:
-            response = self.client.get(CIFM_NAV_URL, headers=BROWSER_HEADERS)
-            response.raise_for_status()
-            self._content_cache[CIFM_NAV_URL] = response.content
+            self._content_cache[CIFM_NAV_URL] = self._download_cifm_content()
         return parse_cifm_nav(self._content_cache[CIFM_NAV_URL], code)
+
+    def _download_cifm_content(self) -> bytes:
+        content = bytearray()
+        expected_total: int | None = None
+        validator: str | None = None
+        last_error: Exception | None = None
+
+        for attempt in range(CIFM_DOWNLOAD_ATTEMPTS):
+            offset = len(content)
+            headers = {**BROWSER_HEADERS, "Accept-Encoding": "identity"}
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+                if validator:
+                    headers["If-Range"] = validator
+
+            try:
+                with self.client.stream(
+                    "GET", CIFM_NAV_URL, headers=headers
+                ) as response:
+                    if offset and response.status_code == 200:
+                        # Range was ignored, or If-Range detected a newer file.
+                        content.clear()
+                        offset = 0
+                        expected_total = None
+                        validator = None
+                    response.raise_for_status()
+
+                    response_validator = response.headers.get(
+                        "etag"
+                    ) or response.headers.get("last-modified")
+                    if offset and validator and response_validator != validator:
+                        content.clear()
+                        expected_total = None
+                        validator = None
+                        raise RuntimeError(
+                            "CIFM NAV file changed while resuming download"
+                        )
+                    validator = response_validator or validator
+
+                    segment_length = _content_length(response)
+                    if response.status_code == 206:
+                        range_start, range_total = _content_range(response)
+                        if range_start != offset:
+                            raise RuntimeError(
+                                "CIFM NAV resume response started at an "
+                                f"unexpected byte: {range_start} != {offset}"
+                            )
+                        expected_total = range_total
+                    elif response.status_code == 200:
+                        expected_total = segment_length
+                    else:
+                        raise RuntimeError(
+                            "CIFM NAV download returned unexpected status "
+                            f"{response.status_code}"
+                        )
+
+                    segment_start = len(content)
+                    for chunk in response.iter_raw(chunk_size=None):
+                        content.extend(chunk)
+
+                    received = len(content) - segment_start
+                    if segment_length is not None and received != segment_length:
+                        raise RuntimeError(
+                            "CIFM NAV response body was incomplete: "
+                            f"received {received} bytes, expected {segment_length}"
+                        )
+                    if expected_total is not None and len(content) != expected_total:
+                        raise RuntimeError(
+                            "CIFM NAV file was incomplete: "
+                            f"received {len(content)} bytes, expected {expected_total}"
+                        )
+
+                try:
+                    ET.fromstring(content)
+                except ET.ParseError as exc:
+                    content.clear()
+                    expected_total = None
+                    validator = None
+                    raise RuntimeError("CIFM NAV XML was invalid") from exc
+                return bytes(content)
+            except (httpx.HTTPError, RuntimeError) as exc:
+                last_error = exc
+                if attempt + 1 < CIFM_DOWNLOAD_ATTEMPTS:
+                    sleep(2**attempt)
+
+        raise RuntimeError(
+            f"CIFM NAV download failed after {CIFM_DOWNLOAD_ATTEMPTS} attempts"
+        ) from last_error
 
     def _fetch_china_universal(
         self, code: str, start_date: date, end_date: date

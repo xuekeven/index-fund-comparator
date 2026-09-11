@@ -5,13 +5,19 @@ import { createPortal } from "react-dom";
 import { getFundDetailUrl } from "@/lib/fund-links";
 import type { FundSortKey, SortDirection } from "@/lib/fund-list";
 import type { FundComparisonRow, FundTag } from "@/lib/types";
+import { formatFundTagLabel } from "@/lib/fund-tag-values";
 import { CloseIcon } from "./icons";
 
 interface FundListProps {
   funds: FundComparisonRow[];
   selected: string[];
   onToggle: (code: string) => void;
-  onTagsSave: (code: string, tags: FundTag[]) => Promise<boolean>;
+  onTagsSave: (
+    code: string,
+    tags: FundTag[],
+    holdingAmount: number | null,
+    recurringAmount: number | null,
+  ) => Promise<boolean>;
   tagSavingCodes: string[];
   onOpenShareClassHelp: () => void;
 }
@@ -35,6 +41,10 @@ function formatFee(value: number | null) {
   return value === null ? "—" : value.toFixed(2);
 }
 
+function formatDataDate(value: string | null) {
+  return value ? value.slice(5).replace("-", "/") : "—";
+}
+
 function getReturn(fund: FundComparisonRow, period: string) {
   return fund.returns.find((item) => item.period === period)?.value ?? null;
 }
@@ -50,7 +60,7 @@ function SubscriptionTag({ fund }: { fund: FundComparisonRow }) {
   }
   if (fund.subscriptionStatus === "limited") {
     const amount = fund.subscriptionLimitAmount;
-    const unit = fund.subscriptionLimitCurrency === "美元" ? "美元" : "元";
+    const unit = fund.subscriptionLimitCurrency === "美元" ? "美元" : "人民币";
     const label = amount === null
       ? "限额申购"
       : `限额${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(amount)}${unit}`;
@@ -72,7 +82,9 @@ function FundUserTags({ fund }: { fund: FundComparisonRow }) {
   return (
     <div className="user-tag-list" aria-label="基金标签">
       {tags.map((tag) => (
-        <span key={tag.value} className={`user-tag ${tag.value}`}>{tag.label}</span>
+        <span key={tag.value} className={`user-tag ${tag.value}`}>
+          {formatFundTagLabel(fund, tag.value)}
+        </span>
       ))}
     </div>
   );
@@ -108,10 +120,21 @@ function FundEditDialog({
 }: {
   fund: FundComparisonRow;
   saving: boolean;
-  onSave: (code: string, tags: FundTag[]) => Promise<boolean>;
+  onSave: (
+    code: string,
+    tags: FundTag[],
+    holdingAmount: number | null,
+    recurringAmount: number | null,
+  ) => Promise<boolean>;
   onClose: () => void;
 }) {
   const [draftTags, setDraftTags] = useState<FundTag[]>(fund.tags);
+  const [holdingAmount, setHoldingAmount] = useState(
+    fund.holdingAmount === null ? "" : String(fund.holdingAmount),
+  );
+  const [recurringAmount, setRecurringAmount] = useState(
+    fund.recurringAmount === null ? "" : String(fund.recurringAmount),
+  );
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -145,7 +168,14 @@ function FundEditDialog({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving) return;
-    if (await onSave(fund.code, draftTags)) onClose();
+    const parsedHoldingAmount = holdingAmount.trim() === "" ? null : Number(holdingAmount);
+    const parsedRecurringAmount = recurringAmount.trim() === "" ? null : Number(recurringAmount);
+    if (await onSave(
+      fund.code,
+      draftTags,
+      parsedHoldingAmount,
+      parsedRecurringAmount,
+    )) onClose();
   }
 
   return createPortal(
@@ -188,17 +218,54 @@ function FundEditDialog({
           <div className="fund-edit-field">
             <span className="fund-edit-label">标签</span>
             <div className="fund-edit-tag-control">
-              {USER_TAGS.map((tag) => (
-                <label key={tag.value} className="fund-edit-tag-option">
-                <input
-                  type="checkbox"
-                  checked={draftTags.includes(tag.value)}
-                  disabled={saving}
-                  onChange={() => toggleDraftTag(tag.value)}
-                />
-                  <span>{tag.label}</span>
-                </label>
-              ))}
+              {USER_TAGS.map((tag) => {
+                const checked = draftTags.includes(tag.value);
+                return (
+                  <div className="fund-edit-tag-row" key={tag.value}>
+                    <label className="fund-edit-tag-option">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={saving}
+                        onChange={() => toggleDraftTag(tag.value)}
+                      />
+                      <span>{tag.label}</span>
+                    </label>
+                    {tag.value === "holding" && checked && (
+                      <label className="fund-edit-tag-amount">
+                        <span>合计</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          inputMode="decimal"
+                          value={holdingAmount}
+                          disabled={saving}
+                          aria-label="持有份额"
+                          onChange={(event) => setHoldingAmount(event.target.value)}
+                        />
+                        <span>份额</span>
+                      </label>
+                    )}
+                    {tag.value === "recurring" && checked && (
+                      <label className="fund-edit-tag-amount">
+                        <span>合计</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          inputMode="decimal"
+                          value={recurringAmount}
+                          disabled={saving}
+                          aria-label="定投金额"
+                          onChange={(event) => setRecurringAmount(event.target.value)}
+                        />
+                        <span>{fund.currency === "美元" ? "美元" : "人民币"}</span>
+                      </label>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
           <div className="fund-edit-actions">
@@ -267,20 +334,23 @@ export function FundTable({
   const [editingCode, setEditingCode] = useState<string | null>(null);
   const closeEditor = useCallback(() => setEditingCode(null), []);
   const editingFund = funds.find((fund) => fund.code === editingCode) ?? null;
+  const venueClass = funds.some((fund) => fund.tradingVenue === "场内")
+    ? "on-exchange"
+    : "off-exchange";
 
   return (
     <>
       <div className="table-wrap">
-      <table className="fund-table">
+      <table className={`fund-table ${venueClass}`}>
         <thead>
           <tr>
             <th className="select-column"><span className="sr-only">选择</span></th>
             <th className="code-column" aria-sort={sortKey === "code" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
-              <SortableHeader label="基金代码" sortKey="code" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+              <SortableHeader label="代码" sortKey="code" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
             </th>
             <th className="fund-column" aria-sort={sortKey === "name" ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
               <div className="fund-column-header">
-                <SortableHeader label="基金份额" sortKey="name" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+                <SortableHeader label="份额" sortKey="name" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
                 {funds.some((fund) => fund.tradingVenue === "场外") && (
                   <button
                     className="context-help-button"
@@ -351,21 +421,39 @@ export function FundTable({
                   <FundUserTags fund={fund} />
                 </td>
                 <td className="price-cell">
-                  {fund.closePrice !== null && (
-                    <div>
-                      <span>收盘</span>
-                      <div className="price-value">
-                        <strong>{formatNumber(fund.closePrice, 3)}</strong>
+                  {fund.tradingVenue === "场内" ? (
+                    <>
+                      {fund.closePrice !== null && (
+                        <div className="dated-price-row">
+                          <div className="dated-price-label">
+                            <small className="price-date">{formatDataDate(fund.closeDate)}</small>
+                            <span>收盘</span>
+                          </div>
+                          <div className="price-value">
+                            <strong>{formatNumber(fund.closePrice, 3)}</strong>
+                          </div>
+                        </div>
+                      )}
+                      <div className="dated-price-row">
+                        <div className="dated-price-label">
+                          <small className="price-date">{formatDataDate(fund.navDate)}</small>
+                          <span>净值</span>
+                        </div>
+                        <div className="price-value">
+                          <strong>{formatNumber(fund.nav)}</strong>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="off-exchange-price-row">
+                      <span>净值</span>
+                      <div className="off-exchange-price-values">
+                        <strong>{formatNumber(fund.nav)}</strong>
+                        <small className="price-date">{formatDataDate(fund.navDate)}</small>
+                        <SubscriptionTag fund={fund} />
                       </div>
                     </div>
                   )}
-                  <div>
-                    <span>净值</span>
-                    <div className="price-value">
-                      <strong>{formatNumber(fund.nav)}</strong>
-                    </div>
-                  </div>
-                  <SubscriptionTag fund={fund} />
                   {fund.estimatedDeviation !== null && <em className={fund.estimatedDeviation >= 0 ? "warn" : "negative"}>偏离 {formatPercent(fund.estimatedDeviation)}</em>}
                 </td>
                 <td className="fee-cell">

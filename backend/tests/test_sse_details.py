@@ -1,11 +1,15 @@
 from datetime import date
 from decimal import Decimal
+import json
 
 import pytest
 
 from app.sync.sse_details import (
     calculate_return_metrics,
+    eid_nav_query_data,
+    is_legacy_iopv_nav_source,
     merge_product_summary_fee_rates,
+    parse_eid_nav_report,
     parse_sse_detail_info,
     parse_sse_nav_history,
     parse_sse_snapshot,
@@ -87,7 +91,7 @@ def test_parses_sse_detail_snapshot() -> None:
     assert snapshot.code == "510500"
     assert snapshot.trade_date == date(2026, 8, 14)
     assert snapshot.close_price == Decimal("7.998")
-    assert snapshot.nav == Decimal("8.0051")
+    assert snapshot.iopv == Decimal("8.0051")
     assert snapshot.volume == Decimal("254678534")
     assert snapshot.turnover_amount == Decimal("2032474227")
 
@@ -95,6 +99,47 @@ def test_parses_sse_detail_snapshot() -> None:
 def test_rejects_incomplete_sse_snapshot() -> None:
     with pytest.raises(RuntimeError, match="incomplete"):
         parse_sse_snapshot({"code": "510500", "date": 20260814, "snap": []})
+
+
+def test_eid_nav_query_and_parser_use_formal_date_and_exact_code() -> None:
+    query = json.loads(
+        eid_nav_query_data("513500", date(2025, 8, 1), date(2026, 9, 4))
+    )
+    assert {item["name"]: item["value"] for item in query}["fundCode"] == "513500"
+
+    records = parse_eid_nav_report(
+        {
+            "aaData": [
+                {
+                    "code": "513500",
+                    "valuationDate": "2026-09-03",
+                    "shareNetValue": "2.4849",
+                },
+                {
+                    "code": "513650",
+                    "valuationDate": "2026-09-03",
+                    "shareNetValue": "1.8926",
+                },
+            ]
+        },
+        "513500",
+    )
+
+    assert [(record.nav_date, record.unit_nav) for record in records] == [
+        (date(2026, 9, 3), Decimal("2.4849"))
+    ]
+
+
+def test_identifies_only_legacy_sse_iopv_nav_sources() -> None:
+    assert is_legacy_iopv_nav_source(
+        "https://yunhq.sse.com.cn:32042/v1/sh1/dayk/513500?begin=-320"
+    )
+    assert is_legacy_iopv_nav_source(
+        "https://etf.sse.com.cn/fundlist/funddetail/index.shtml?code=513500"
+    )
+    assert not is_legacy_iopv_nav_source(
+        "http://eid.csrc.gov.cn/fund/disclose/getPublicFundJZInfoMore.do"
+    )
 
 
 def test_parses_sse_nav_history() -> None:

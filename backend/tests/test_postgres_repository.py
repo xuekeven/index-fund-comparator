@@ -213,15 +213,19 @@ def test_postgres_repository_returns_category_freshness(repository) -> None:
 
 
 def test_postgres_repository_persists_tags_and_notes(repository) -> None:
-    tags = repository.set_fund_tags(
+    tag_state = repository.set_fund_tags(
         "000001",
         [FundTagType.FAVORITE, FundTagType.RECURRING],
+        recurring_amount=88,
     )
-    assert [tag.value for tag in tags or []] == ["favorite", "recurring"]
+    assert [tag.value for tag in tag_state.tags] == ["favorite", "recurring"]
+    assert tag_state.holding_amount is None
+    assert tag_state.recurring_amount == 88
     assert [tag.value for tag in repository.get_fund("000001").tags] == [
         "favorite",
         "recurring",
     ]
+    assert repository.get_fund("000001").recurring_amount == 88
 
     note = repository.create_note(
         InvestmentNoteCreate(
