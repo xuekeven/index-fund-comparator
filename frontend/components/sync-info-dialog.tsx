@@ -289,7 +289,7 @@ const SYNC_ROWS: Array<{
       },
       {
         key: "F",
-        schedule: "周一至周五 22:00",
+        schedule: "周一至周五 09:00\n周一至周五 22:00",
         sources: [{
           label: "证监会基金电子披露网站",
           url: "http://eid.csrc.gov.cn/fund",

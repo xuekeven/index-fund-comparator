@@ -191,7 +191,7 @@ IFC_DATA_MODE=database
 IFC_CORS_ORIGINS=https://homeserver.tailed5977.ts.net
 ```
 
-安装数据同步定时任务。当前配置为脚本 A/C 每周一 `09:00`、脚本 E 每月 1 日 `09:00`、脚本 B/D/F 周一至周五 `22:00`，时区为 `Asia/Shanghai`：
+安装数据同步定时任务。当前配置为脚本 A/C 每周一 `09:00`、脚本 E 每月 1 日 `09:00`、脚本 B/D 周一至周五 `22:00`、脚本 F 周一至周五 `09:00` 和 `22:00`，时区为 `Asia/Shanghai`：
 
 ```bash
 ./deploy/manage-crontab.sh print

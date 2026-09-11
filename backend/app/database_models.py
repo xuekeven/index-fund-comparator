@@ -275,7 +275,6 @@ class KnowledgeArticle(Base, TimestampMixin):
     category: Mapped[str] = mapped_column(String(80), nullable=False)
     category_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     article_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    summary: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     content_markdown: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("''")
     )
@@ -285,7 +284,6 @@ class KnowledgeArticle(Base, TimestampMixin):
     sources: Mapped[list[dict[str, str | None]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
-    reviewed_at: Mapped[date | None] = mapped_column(Date)
 
     __table_args__ = (
         Index("ix_knowledge_article_user_category", "user_id", "category"),

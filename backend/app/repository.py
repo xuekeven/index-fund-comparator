@@ -135,7 +135,7 @@ def _normalized_knowledge_values(
     payload: KnowledgeArticleCreate | KnowledgeArticleUpdate,
 ) -> dict[str, Any]:
     values = payload.model_dump()
-    for field in ("title", "category", "summary", "content_markdown"):
+    for field in ("title", "category", "content_markdown"):
         values[field] = values[field].strip()
     values["tags"] = list(
         dict.fromkeys(value.strip() for value in payload.tags if value.strip())
@@ -172,11 +172,9 @@ def _knowledge_item(article: KnowledgeArticle) -> KnowledgeArticleItem:
         id=article.id,
         title=article.title,
         category=article.category,
-        summary=article.summary,
         content_markdown=article.content_markdown,
         tags=list(article.tags or []),
         sources=list(article.sources or []),
-        reviewed_at=article.reviewed_at,
         category_order=article.category_order,
         article_order=article.article_order,
         created_at=article.created_at,
@@ -519,7 +517,6 @@ class SampleFundRepository(FundRepository):
                     (
                         article.title,
                         article.category,
-                        article.summary,
                         article.content_markdown,
                         " ".join(article.tags),
                         " ".join(
@@ -1090,7 +1087,6 @@ class PostgresFundRepository(FundRepository):
                     or_(
                         KnowledgeArticle.title.ilike(pattern),
                         KnowledgeArticle.category.ilike(pattern),
-                        KnowledgeArticle.summary.ilike(pattern),
                         KnowledgeArticle.content_markdown.ilike(pattern),
                         cast(KnowledgeArticle.tags, String).ilike(pattern),
                         cast(KnowledgeArticle.sources, String).ilike(pattern),

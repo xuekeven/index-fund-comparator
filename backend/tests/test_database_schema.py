@@ -123,7 +123,8 @@ def test_knowledge_articles_store_stable_reference_fields() -> None:
     assert "user_id" in article_table.columns
     assert "content_markdown" in article_table.columns
     assert "sources" in article_table.columns
-    assert "reviewed_at" in article_table.columns
+    assert "summary" not in article_table.columns
+    assert "reviewed_at" not in article_table.columns
     assert "status" not in article_table.columns
     assert "category_order" in article_table.columns
     assert "article_order" in article_table.columns

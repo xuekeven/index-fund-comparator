@@ -278,18 +278,16 @@ def test_knowledge_articles_round_trip() -> None:
         json={
             "title": "美国利率体系",
             "category": "利率",
-            "summary": "理解 FFR、IOER 和 ON RRP 的关系。",
             "contentMarkdown": "# 定义\n\n美联储通过利率工具影响流动性。",
             "tags": ["利率", "美国"],
             "sources": [{"name": "Federal Reserve", "url": "https://www.federalreserve.gov/"}],
-            "reviewedAt": "2026-08-31",
         },
     )
     assert created.status_code == 201
     article_id = created.json()["id"]
     assert created.json()["sources"][0]["name"] == "Federal Reserve"
 
-    listed = client.get("/api/v1/knowledge", params={"q": "FFR", "category": "利率"})
+    listed = client.get("/api/v1/knowledge", params={"q": "流动性", "category": "利率"})
     assert listed.status_code == 200
     assert [item["id"] for item in listed.json()] == [article_id]
 

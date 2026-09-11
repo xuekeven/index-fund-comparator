@@ -137,11 +137,9 @@ export interface KnowledgeSource {
 export interface KnowledgeArticlePayload {
   title: string;
   category: string;
-  summary: string;
   contentMarkdown: string;
   tags: string[];
   sources: KnowledgeSource[];
-  reviewedAt: string | null;
 }
 
 export interface KnowledgeArticle extends KnowledgeArticlePayload {

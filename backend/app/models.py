@@ -197,11 +197,9 @@ class KnowledgeSource(ApiModel):
 class KnowledgeArticlePayload(ApiModel):
     title: str = Field(min_length=1, max_length=200)
     category: str = Field(min_length=1, max_length=80)
-    summary: str = ""
     content_markdown: str = ""
     tags: list[str] = Field(default_factory=list, max_length=20)
     sources: list[KnowledgeSource] = Field(default_factory=list, max_length=20)
-    reviewed_at: date | None = None
 
 
 class KnowledgeArticleCreate(KnowledgeArticlePayload):

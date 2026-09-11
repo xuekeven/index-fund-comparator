@@ -243,11 +243,9 @@ def test_postgres_repository_persists_knowledge_articles(repository) -> None:
         KnowledgeArticleCreate(
             title="长期债券",
             category="债券",
-            summary="利率与长债价格通常反向变动。",
             content_markdown="# 利率关系\n\n降息通常有利于长债价格。",
             tags=["利率", "长债"],
             sources=[{"name": "测试资料", "url": "https://example.com/bonds"}],
-            reviewed_at=date(2026, 8, 31),
         )
     )
 

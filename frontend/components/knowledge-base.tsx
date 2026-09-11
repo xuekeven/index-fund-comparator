@@ -52,11 +52,9 @@ function emptyDraft(categoryOptions: string[] = DEFAULT_CATEGORIES): ArticleDraf
   return {
     title: "",
     category: categoryOptions[0] ?? "",
-    summary: "",
     contentMarkdown: "",
     tags: [],
     sources: [{ name: "", url: null }],
-    reviewedAt: null,
   };
 }
 
@@ -64,13 +62,11 @@ function toDraft(article: KnowledgeArticle): ArticleDraft {
   return {
     title: article.title,
     category: article.category,
-    summary: "",
     contentMarkdown: article.contentMarkdown,
     tags: article.tags,
     sources: article.sources.length > 0
       ? article.sources
       : [{ name: "", url: null }],
-    reviewedAt: article.reviewedAt,
   };
 }
 
@@ -335,8 +331,9 @@ export function KnowledgeBase() {
       ...draft,
       title: draft.title.trim(),
       category: draft.category.trim(),
-      summary: "",
-      contentMarkdown: draft.contentMarkdown.trim(),
+      contentMarkdown: currentEditing === "new"
+        ? draft.contentMarkdown.trim()
+        : currentEditing.contentMarkdown,
       sources: draft.sources
         .filter((source) => source.name.trim())
         .map((source) => ({
@@ -405,11 +402,9 @@ export function KnowledgeBase() {
       const saved = await updateKnowledgeArticle(article.id, {
         title: article.title,
         category: article.category,
-        summary: "",
         contentMarkdown: inlineBodyDraft.content.trim(),
         tags: article.tags,
         sources: article.sources,
-        reviewedAt: article.reviewedAt,
       });
       setArticles((current) => current.map((item) => (
         item.id === saved.id ? saved : item
@@ -709,6 +704,15 @@ export function KnowledgeBase() {
                 <header className="knowledge-reader-head">
                   <h2>{activeArticle.title}</h2>
                   <div className="knowledge-reader-actions">
+                    {inlineBodyDraft?.articleId !== activeArticle.id && (
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={() => startEdit(activeArticle)}
+                      >
+                        编辑信息
+                      </button>
+                    )}
                     <button
                       className={inlineBodyDraft?.articleId === activeArticle.id ? "primary" : ""}
                       type="button"
@@ -750,26 +754,17 @@ export function KnowledgeBase() {
                       </button>
                     )}
                     {inlineBodyDraft?.articleId !== activeArticle.id && (
-                      <>
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={() => startEdit(activeArticle)}
-                        >
-                          编辑
-                        </button>
-                        <button
-                          className="danger"
-                          type="button"
-                          disabled={saving}
-                          onClick={() => {
-                            setError(null);
-                            setDeleteTarget(activeArticle);
-                          }}
-                        >
-                          删除
-                        </button>
-                      </>
+                      <button
+                        className="danger"
+                        type="button"
+                        disabled={saving}
+                        onClick={() => {
+                          setError(null);
+                          setDeleteTarget(activeArticle);
+                        }}
+                      >
+                        删除文章
+                      </button>
                     )}
                   </div>
                 </header>
@@ -855,7 +850,7 @@ export function KnowledgeBase() {
           }}
         >
           <div
-            className="knowledge-editor-dialog"
+            className={`knowledge-editor-dialog${editing === "new" ? "" : " metadata-only"}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="knowledge-editor-title"
@@ -865,7 +860,7 @@ export function KnowledgeBase() {
                 <div>
                   <span className="section-kicker">知识库维护</span>
                   <h2 id="knowledge-editor-title">
-                    {editing === "new" ? "新建手册文章" : "编辑手册文章"}
+                    {editing === "new" ? "新建手册文章" : "编辑文章信息"}
                   </h2>
                 </div>
                 <button
@@ -914,20 +909,22 @@ export function KnowledgeBase() {
                   />
                 </label>
               </div>
-              <label className="knowledge-form-field">
-                <span>正文（Markdown）</span>
-                <textarea
-                  className="knowledge-content-input"
-                  required
-                  rows={14}
-                  value={draft.contentMarkdown}
-                  onChange={(event) => setDraft({
-                    ...draft,
-                    contentMarkdown: event.target.value,
-                  })}
-                  placeholder={"# 主题\n\n写下定义、逻辑、适用场景和注意事项。"}
-                />
-              </label>
+              {editing === "new" && (
+                <label className="knowledge-form-field">
+                  <span>正文（Markdown）</span>
+                  <textarea
+                    className="knowledge-content-input"
+                    required
+                    rows={14}
+                    value={draft.contentMarkdown}
+                    onChange={(event) => setDraft({
+                      ...draft,
+                      contentMarkdown: event.target.value,
+                    })}
+                    placeholder={"# 主题\n\n写下定义、逻辑、适用场景和注意事项。"}
+                  />
+                </label>
+              )}
               <div className="knowledge-form-field">
                 <div className="knowledge-field-heading">
                   <span>参考资料</span>
@@ -983,7 +980,7 @@ export function KnowledgeBase() {
               <footer className="knowledge-editor-actions">
                 <button type="button" disabled={saving} onClick={closeEditor}>取消</button>
                 <button className="primary" type="submit" disabled={saving}>
-                  {saving ? "保存中…" : "保存文章"}
+                  {saving ? "保存中…" : editing === "new" ? "保存文章" : "保存信息"}
                 </button>
               </footer>
             </form>
